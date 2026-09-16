@@ -18,7 +18,7 @@ jobs:
         with:
           deno-version: v1.x
 
-      - name: Run PSX Quotes Scraper
+- name: Run PSX Quotes Scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
