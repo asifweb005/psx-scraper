@@ -36,14 +36,13 @@ function extractRow(text: string, labels: string[]): string[] | null {
   return tokens.length >= labels.length ? tokens : null;
 }
 
-// Sanitize numbers to prevent PostgreSQL numeric overflow errors
+// Clamps extreme outliers to prevent PostgreSQL numeric overflow errors
 function numFromToken(token: string | undefined): number | null {
   if (!token) return null;
   const m = token.match(/-?\d+(?:\.\d+)?/);
   if (!m) return null;
   const val = parseFloat(m[0]);
   if (!Number.isFinite(val)) return null;
-  // Clamp extreme values between -99999.99 and 99999.99
   if (val > 99999.99) return 99999.99;
   if (val < -99999.99) return -99999.99;
   return Math.round(val * 100) / 100;
@@ -148,7 +147,7 @@ async function main() {
             updated_at: new Date().toISOString(),
           };
 
-          // Upsert row by row to prevent single-symbol failures from blocking the batch
+          // Upsert row-by-row so a single problem stock never stops the remaining stocks
           const { error: singleErr } = await supabase
             .from("fundamentals")
             .upsert(payload, { onConflict: "symbol" });
@@ -180,7 +179,7 @@ async function main() {
     
   } catch (error: unknown) {
     const err = error as { message?: string; details?: string; hint?: string };
-    const msg = err?.message ? `${err.message} (${err.details ?? err.hint ?? ""})` : String(error);
+    const msg = err?.message ? `${err.message} (${err.details ?? err.hint ?? ""})` : JSON.stringify(error);
     await supabase.from("sync_log").insert({ job: "sync-fundamentals", status: "error", detail: msg.slice(0, 500) });
     console.error(`❌ Error: ${msg}`);
     Deno.exit(1);
