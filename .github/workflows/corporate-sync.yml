@@ -1,0 +1,25 @@
+name: PSX Corporate Events Sync
+
+on:
+  schedule:
+    # Runs once daily at 6:00 PM PKT (13:00 UTC, Mon-Fri)
+    - cron: '0 13 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  sync-corporate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+
+      - name: Run PSX Corporate Events Scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: deno run --allow-net --allow-env corporate.ts all
