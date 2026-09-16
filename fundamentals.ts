@@ -36,12 +36,17 @@ function extractRow(text: string, labels: string[]): string[] | null {
   return tokens.length >= labels.length ? tokens : null;
 }
 
+// Sanitize numbers to prevent PostgreSQL numeric overflow errors
 function numFromToken(token: string | undefined): number | null {
   if (!token) return null;
   const m = token.match(/-?\d+(?:\.\d+)?/);
   if (!m) return null;
   const val = parseFloat(m[0]);
-  return Number.isFinite(val) ? val : null;
+  if (!Number.isFinite(val)) return null;
+  // Clamp extreme values between -99999.99 and 99999.99
+  if (val > 99999.99) return 99999.99;
+  if (val < -99999.99) return -99999.99;
+  return Math.round(val * 100) / 100;
 }
 
 const EARNINGS_LABELS = [
@@ -108,10 +113,9 @@ async function main() {
       Deno.exit(0);
     }
 
-    const results: Record<string, unknown>[] = [];
-    let full = 0, partial = 0, empty = 0;
-
     console.log(`Found ${stocks.length} active stocks. Scraping scstrade.com safely...`);
+
+    let full = 0, partial = 0, empty = 0, saved = 0;
 
     for (let i = 0; i < stocks.length; i++) {
       const symbol = stocks[i].symbol;
@@ -134,7 +138,7 @@ async function main() {
         const gotCount = [peRatio, pbRatio, roe, debtToEquity, dividendYield].filter((v) => v !== null).length;
 
         if (gotCount > 0) {
-          results.push({
+          const payload = {
             symbol,
             pe_ratio: peRatio,
             pb_ratio: pbRatio,
@@ -142,38 +146,42 @@ async function main() {
             debt_to_equity: debtToEquity,
             dividend_yield: dividendYield,
             updated_at: new Date().toISOString(),
-          });
-          if (gotCount === 5) full++; else partial++;
+          };
+
+          // Upsert row by row to prevent single-symbol failures from blocking the batch
+          const { error: singleErr } = await supabase
+            .from("fundamentals")
+            .upsert(payload, { onConflict: "symbol" });
+
+          if (!singleErr) {
+            saved++;
+            if (gotCount === 5) full++; else partial++;
+          } else {
+            console.warn(`Database warning on ${symbol}: ${singleErr.message}`);
+            empty++;
+          }
         } else {
           empty++;
         }
-      } catch (err) {
+      } catch {
         empty++;
       }
       
-      // Progress logging every 10 stocks so you can watch it live in GitHub Actions
       if ((i + 1) % 10 === 0) {
-        console.log(`Processed ${i + 1}/${stocks.length} stocks...`);
+        console.log(`Processed ${i + 1}/${stocks.length} stocks (${saved} saved)...`);
       }
       
-      // Luxury Pacing: Wait 1 full second between every stock to mimic human browsing
       await new Promise((r) => setTimeout(r, 1000));
     }
 
-    if (results.length > 0) {
-      const { error: upsertErr } = await supabase
-        .from("fundamentals").upsert(results, { onConflict: "symbol" });
-      if (upsertErr) throw upsertErr;
-    }
-
-    const summary = `Total: ${stocks.length} | Full: ${full} | Partial: ${partial} | Empty: ${empty}`;
-    
+    const summary = `Total: ${stocks.length} | Saved: ${saved} | Full: ${full} | Partial: ${partial} | Empty: ${empty}`;
     await supabase.from("sync_log").insert({ job: "sync-fundamentals", status: "ok", detail: summary });
     console.log(`✅ Success: ${summary}`);
     
-  } catch (error) {
-    const msg = String(error).slice(0, 500);
-    await supabase.from("sync_log").insert({ job: "sync-fundamentals", status: "error", detail: msg });
+  } catch (error: unknown) {
+    const err = error as { message?: string; details?: string; hint?: string };
+    const msg = err?.message ? `${err.message} (${err.details ?? err.hint ?? ""})` : String(error);
+    await supabase.from("sync_log").insert({ job: "sync-fundamentals", status: "error", detail: msg.slice(0, 500) });
     console.error(`❌ Error: ${msg}`);
     Deno.exit(1);
   }
