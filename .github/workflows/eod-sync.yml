@@ -1,0 +1,25 @@
+name: PSX End of Day Sync
+
+on:
+  schedule:
+    # Runs once daily at 5:45 PM PKT (12:45 UTC, Mon-Fri)
+    - cron: '45 12 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  eod-tasks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+
+      - name: Run PSX EOD Scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: deno run --allow-net --allow-env scraper.ts eod
