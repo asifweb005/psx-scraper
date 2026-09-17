@@ -1,9 +1,7 @@
 name: PSX Live Quotes Sync
 
 on:
-  schedule:
-    # Runs every 5 mins from 9:00 AM to 3:59 PM PKT (4:00 - 10:59 UTC, Mon-Fri)
-    - cron: '*/5 4-10 * * 1-5'
+ 
   workflow_dispatch:
 
 jobs:
