@@ -1,0 +1,45 @@
+name: PSX Indicators
+
+on:
+  # Runs right after "PSX End of Day Sync" finishes, so today's bar is already
+  # in historical_prices (a fixed cron could race it on a busy GitHub runner).
+  workflow_run:
+    workflows: ["PSX End of Day Sync"]
+    types: [completed]
+  # Manual runs: pick the args in the GitHub UI, e.g.
+  #   --verify 2026-09-11   (read-only diff against stored rows)
+  #   --dry-run             (compute, don't write)
+  #   --backfill 5          (recompute the last 5 trading days)
+  workflow_dispatch:
+    inputs:
+      indicator_args:
+        description: 'indicators.ts args (e.g. "--backfill 5", "--verify 2026-09-11", "--dry-run")'
+        required: false
+        default: '--backfill 1'
+
+jobs:
+  indicators:
+    # For workflow_run, only continue if the EOD sync succeeded.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+
+      - name: Run unit tests (fail fast if the math drifted)
+        run: deno test indicators_test.ts
+
+      - name: Compute technical indicators
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Uncomment / edit if your KSE-100 history table differs:
+          # INDEX_TABLE: index_history
+          # INDEX_CODE: KSE100
+          INDICATOR_ARGS: ${{ github.event.inputs.indicator_args || '--backfill 1' }}
+        run: deno run --allow-net --allow-env indicators.ts $INDICATOR_ARGS
