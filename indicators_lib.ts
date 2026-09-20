@@ -25,7 +25,7 @@ export interface IndicatorRow {
   sma_200: number | null;
   ema_12: number;
   ema_26: number;
-  ema_50: number;
+  ema_50: number | null;
   rsi_14: number | null;
   macd_line: number;
   macd_signal: number;
@@ -228,7 +228,9 @@ export function computeIndicators(
     sma_20: orNull(s20), sma_50: orNull(s50), sma_200: orNull(s200),
     ema_12: round(ema12[ema12.length - 1]),
     ema_26: round(ema26[ema26.length - 1]),
-    ema_50: round(ema50[ema50.length - 1]),
+    // null with < 50 bars (an EMA seeded on a short series is misleading; the
+    // rows your old pipeline stored were null here too)
+    ema_50: closes.length >= 50 ? round(ema50[ema50.length - 1]) : null,
     rsi_14: orNull(rsi),
     macd_line: round(macd), macd_signal: round(macdSig),
     macd_histogram: round(macd - macdSig),
