@@ -1,244 +1,256 @@
-  // indicators_lib.ts -- pure indicator math, no network / DB access.
+// indicators.ts -- recompute technical_indicators from historical_prices.
 //
-// score + signal are an EXACT copy of the formula in backtest-signals'
-// scoreAt() (RSI / SMA50 / SMA200 / MACD / Bollinger + liquidity gate on the
-// label), so live signals and backtested signals are the same rule.
+// Run after the EOD bar has been appended (chained in eod-sync.yml).
 //
-// Columns the backtest does not define (ATR, OBV, VWAP, support/resistance,
-// relative strength, OBV divergence) use the conventional definitions below.
-// If you have the original psx-sync definitions, run `--verify` (see
-// indicators.ts) to see how far these differ from what is stored.
+//   deno run --allow-net --allow-env indicators.ts                  # latest day
+//   deno run --allow-net --allow-env indicators.ts --backfill 5     # last 5 trading days
+//   deno run --allow-net --allow-env indicators.ts --dry-run        # compute, don't write
+//   deno run --allow-net --allow-env indicators.ts --verify 2026-09-11
+//        # READ-ONLY: recompute that date and diff against the rows already
+//        # stored, per column. Use it to see how close these definitions are
+//        # to whatever produced your existing rows.
+//   Optional: --symbols PIOC,NETSOL   (limit to a few symbols)
+//
+// Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+// Optional env (relative strength vs KSE-100 needs an index price history):
+//   INDEX_TABLE (default index_history), INDEX_CODE (KSE100),
+//   INDEX_CODE_COL (index_code), INDEX_DATE_COL (traded_on), INDEX_CLOSE_COL (close)
+// If that table/columns don't exist, rel_strength_1m is left null with a warning.
 
-export interface Bar {
-  traded_on: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import type { Bar, IndexCloseLookup, IndicatorRow } from "./indicators_lib.ts";
+import { computeIndicators } from "./indicators_lib.ts";
 
-export interface IndicatorRow {
-  computed_on: string;
-  sma_20: number | null;
-  sma_50: number | null;
-  sma_200: number | null;
-  ema_12: number;
-  ema_26: number;
-  ema_50: number;
-  rsi_14: number | null;
-  macd_line: number;
-  macd_signal: number;
-  macd_histogram: number;
-  bb_upper: number | null;
-  bb_middle: number | null;
-  bb_lower: number | null;
-  atr_14: number | null;
-  obv: number;
-  vwap: number | null;
-  support: number | null;
-  resistance: number | null;
-  signal: string;
-  signal_score: number;
-  rel_strength_1m: number | null;
-  obv_divergence: string | null;
-}
+const SB = createClient(
+  Deno.env.get("SUPABASE_URL")!,
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+);
 
-/** Returns the index close on or before `date`, or null. */
-export type IndexCloseLookup = (date: string) => number | null;
+const INDEX_TABLE = Deno.env.get("INDEX_TABLE") ?? "index_history";
+const INDEX_CODE = Deno.env.get("INDEX_CODE") ?? "KSE100";
+const INDEX_CODE_COL = Deno.env.get("INDEX_CODE_COL") ?? "index_code";
+const INDEX_DATE_COL = Deno.env.get("INDEX_DATE_COL") ?? "traded_on";
+const INDEX_CLOSE_COL = Deno.env.get("INDEX_CLOSE_COL") ?? "close";
+const BARS_PER_SYMBOL = 400; // enough for SMA200 + indicator warm-up
+
+const args = Deno.args;
+const flag = (n: string) => args.includes(n);
+const opt = (n: string) => {
+  const i = args.indexOf(n);
+  return i >= 0 ? args[i + 1] : undefined;
+};
 
 const num = (v: unknown): number => {
   const f = Number(v);
   return Number.isFinite(f) ? f : 0;
 };
-const round = (v: number, d = 4) => {
-  const m = 10 ** d;
-  return Math.round(v * m) / m;
-};
-const orNull = (v: number | null, d = 4) => (v === null ? null : round(v, d));
 
-export function sma(vals: number[], n: number): number | null {
-  if (vals.length < n) return null;
-  return vals.slice(-n).reduce((a, b) => a + b, 0) / n;
+async function activeSymbols(): Promise<string[]> {
+  const only = opt("--symbols")?.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+  if (only?.length) return only;
+  const { data, error } = await SB.from("stocks").select("symbol").eq("is_active", true).order("symbol");
+  if (error) throw error;
+  return (data ?? []).map((r: { symbol: string }) => r.symbol);
 }
 
-export function emaSeries(vals: number[], n: number): number[] {
-  const k = 2 / (n + 1), out: number[] = [];
-  let prev = vals[0] ?? 0;
-  for (let i = 0; i < vals.length; i++) {
-    prev = i === 0 ? vals[0] : vals[i] * k + prev * (1 - k);
-    out.push(prev);
-  }
-  return out;
+async function loadBars(symbol: string): Promise<Bar[]> {
+  // Newest N bars (descending), then reverse -> oldest first.
+  const { data, error } = await SB.from("historical_prices")
+    .select("traded_on, open, high, low, close, volume")
+    .eq("symbol", symbol)
+    .order("traded_on", { ascending: false })
+    .limit(BARS_PER_SYMBOL);
+  if (error) throw error;
+  return (data ?? []).reverse().map((r: Record<string, unknown>) => ({
+    traded_on: String(r.traded_on),
+    open: num(r.open), high: num(r.high), low: num(r.low),
+    close: num(r.close), volume: num(r.volume),
+  }));
 }
 
-export function rsi14(closes: number[]): number | null {
-  if (closes.length < 15) return null;
-  let g = 0, l = 0;
-  for (let i = 1; i <= 14; i++) {
-    const d = closes[i] - closes[i - 1];
-    d >= 0 ? (g += d) : (l -= d);
+async function loadIndexLookup(): Promise<IndexCloseLookup | null> {
+  try {
+    const { data, error } = await SB.from(INDEX_TABLE)
+      .select(`${INDEX_DATE_COL}, ${INDEX_CLOSE_COL}`)
+      .eq(INDEX_CODE_COL, INDEX_CODE)
+      .order(INDEX_DATE_COL, { ascending: false })
+      .limit(600);
+    if (error || !data?.length) {
+      console.warn(`[warn] no index history in ${INDEX_TABLE} (${error?.message ?? "empty"}); rel_strength_1m will be null`);
+      return null;
+    }
+    const rows = (data as Record<string, unknown>[]).reverse()
+      .map((r) => ({ d: String(r[INDEX_DATE_COL]).slice(0, 10), c: num(r[INDEX_CLOSE_COL]) }))
+      .filter((r) => r.c > 0);
+    return (date: string) => {
+      // last index close on or before `date`
+      let lo = 0, hi = rows.length - 1, ans = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (rows[mid].d <= date) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+      }
+      return ans >= 0 ? rows[ans].c : null;
+    };
+  } catch (e) {
+    console.warn(`[warn] index history unavailable: ${String(e).slice(0, 120)}`);
+    return null;
   }
-  let ag = g / 14, al = l / 14;
-  for (let i = 15; i < closes.length; i++) {
-    const d = closes[i] - closes[i - 1];
-    ag = (ag * 13 + Math.max(d, 0)) / 14;
-    al = (al * 13 + Math.max(-d, 0)) / 14;
-  }
-  if (al === 0) return 100;
-  return 100 - 100 / (1 + ag / al);
 }
 
-/** Wilder ATR(14). */
-export function atr14(bars: Bar[]): number | null {
-  if (bars.length < 15) return null;
-  const tr = (i: number) =>
-    Math.max(
-      bars[i].high - bars[i].low,
-      Math.abs(bars[i].high - bars[i - 1].close),
-      Math.abs(bars[i].low - bars[i - 1].close),
-    );
-  let atr = 0;
-  for (let i = 1; i <= 14; i++) atr += tr(i);
-  atr /= 14;
-  for (let i = 15; i < bars.length; i++) atr = (atr * 13 + tr(i)) / 14;
-  return atr;
+/** Real column list of technical_indicators (so a wrong column name can't break the insert). */
+async function tableColumns(): Promise<{ cols: Set<string>; timeframe: string }> {
+  const { data, error } = await SB.from("technical_indicators")
+    .select("*").order("computed_on", { ascending: false }).limit(1);
+  if (error) throw error;
+  const row = data?.[0] as Record<string, unknown> | undefined;
+  if (!row) {
+    throw new Error("technical_indicators is empty; cannot detect columns/timeframe. Insert one row manually first.");
+  }
+  return { cols: new Set(Object.keys(row)), timeframe: String(row.timeframe ?? "1d") };
 }
 
-/** Cumulative on-balance volume over the supplied window. */
-export function obvSeries(bars: Bar[]): number[] {
-  const out: number[] = [0];
-  for (let i = 1; i < bars.length; i++) {
-    const d = bars[i].close - bars[i - 1].close;
-    out.push(out[i - 1] + (d > 0 ? bars[i].volume : d < 0 ? -bars[i].volume : 0));
-  }
-  return out;
-}
+const NUM_COLS: (keyof IndicatorRow)[] = [
+  "sma_20", "sma_50", "sma_200", "ema_12", "ema_26", "ema_50", "rsi_14",
+  "macd_line", "macd_signal", "macd_histogram", "bb_upper", "bb_middle",
+  "bb_lower", "atr_14", "obv", "vwap", "support", "resistance", "signal_score",
+];
 
-/** 20-session rolling VWAP using the typical price (H+L+C)/3. */
-export function vwap20(bars: Bar[]): number | null {
-  const w = bars.slice(-20);
-  let pv = 0, v = 0;
-  for (const b of w) {
-    pv += ((b.high + b.low + b.close) / 3) * b.volume;
-    v += b.volume;
-  }
-  return v > 0 ? pv / v : null;
-}
+// ---------------------------------------------------------------- verify --
+async function verify(date: string) {
+  const symbols = await activeSymbols();
+  const idx = await loadIndexLookup();
+  const stats = new Map<string, { n: number; over01: number; over1: number; maxPct: number }>();
+  let compared = 0, signalSame = 0;
 
-/** Support / resistance = lowest low / highest high of the last 20 sessions. */
-export function supportResistance(
-  bars: Bar[],
-): { support: number | null; resistance: number | null } {
-  const w = bars.slice(-20);
-  const lows = w.map((b) => b.low).filter((x) => x > 0);
-  const highs = w.map((b) => b.high).filter((x) => x > 0);
-  return {
-    support: lows.length ? Math.min(...lows) : null,
-    resistance: highs.length ? Math.max(...highs) : null,
-  };
-}
-
-/**
- * Compute the indicator row for the LAST bar of `bars` (ascending order,
- * oldest first; must end on the day being computed). Returns null with fewer
- * than 20 bars, matching backtest-signals.
- *
- * relative strength: stock 21-session return minus KSE-100 return over the
- * same two dates, in percentage points (null when index history is missing).
- */
-export function computeIndicators(
-  bars: Bar[],
-  indexClose: IndexCloseLookup | null = null,
-): IndicatorRow | null {
-  if (bars.length < 20) return null;
-
-  const closes = bars.map((b) => b.close);
-  const last = closes[closes.length - 1];
-
-  const ema12 = emaSeries(closes, 12), ema26 = emaSeries(closes, 26);
-  const ema50 = emaSeries(closes, 50);
-  const macdSeries = ema12.map((v, i) => v - ema26[i]);
-  const macdSignal = emaSeries(macdSeries, 9);
-  const macd = macdSeries[macdSeries.length - 1];
-  const macdSig = macdSignal[macdSignal.length - 1];
-
-  const s20 = sma(closes, 20), s50 = sma(closes, 50), s200 = sma(closes, 200);
-  const rsi = rsi14(closes);
-
-  let bbU: number | null = null, bbL: number | null = null;
-  if (s20 !== null) {
-    const w = closes.slice(-20);
-    const sd = Math.sqrt(w.reduce((a, v) => a + (v - s20) ** 2, 0) / 20);
-    bbU = s20 + 2 * sd;
-    bbL = s20 - 2 * sd;
-  }
-
-  const w20 = bars.slice(-20);
-  const avgVolume = w20.reduce((a, r) => a + num(r.volume), 0) / 20;
-
-  // ---- score: identical to backtest-signals scoreAt() ----
-  let score = 0;
-  if (rsi !== null) score += rsi < 30 ? 25 : rsi > 70 ? -25 : (50 - rsi) * 0.5;
-  if (s50 !== null) score += last > s50 ? 15 : -15;
-  if (s200 !== null) score += last > s200 ? 15 : -15;
-  score += macd > macdSig ? 20 : -20;
-  if (bbL !== null && last < bbL) score += 10;
-  if (bbU !== null && last > bbU) score -= 10;
-  score = Math.max(-100, Math.min(100, Math.round(score * 100) / 100));
-
-  let signal = score >= 50 ? "strong_buy" : score >= 20 ? "buy"
-    : score <= -50 ? "strong_sell" : score <= -20 ? "sell" : "hold";
-
-  // Liquidity gate on the label only (same thresholds as backtest-signals).
-  if (avgVolume < 25000) {
-    if (signal === "strong_buy" || signal === "buy") signal = "hold";
-    if (signal === "strong_sell" || signal === "sell") signal = "hold";
-  } else if (avgVolume < 100000) {
-    if (signal === "strong_buy") signal = "buy";
-    if (signal === "strong_sell") signal = "sell";
-  }
-
-  // ---- extras ----
-  const obv = obvSeries(bars);
-  const { support, resistance } = supportResistance(bars);
-
-  // Relative strength vs KSE-100 over 21 sessions (percentage points).
-  let rel: number | null = null;
-  if (indexClose && bars.length > 21) {
-    const a = bars[bars.length - 1], b = bars[bars.length - 1 - 21];
-    const ia = indexClose(a.traded_on), ib = indexClose(b.traded_on);
-    if (ia && ib && b.close > 0) {
-      rel = ((a.close / b.close - 1) - (ia / ib - 1)) * 100;
+  for (const sym of symbols) {
+    const bars = await loadBars(sym);
+    const end = bars.findIndex((b) => b.traded_on === date);
+    if (end < 0) continue;
+    const mine = computeIndicators(bars.slice(0, end + 1), idx);
+    const { data } = await SB.from("technical_indicators").select("*")
+      .eq("symbol", sym).eq("computed_on", date).limit(1);
+    const stored = data?.[0] as Record<string, unknown> | undefined;
+    if (!mine || !stored) continue;
+    compared++;
+    if (mine.signal === stored.signal) signalSame++;
+    const close = bars[end].close;
+    for (const col of NUM_COLS) {
+      const a = mine[col] as number | null;
+      const b = stored[col] == null ? NaN : Number(stored[col]);
+      if (a === null || !Number.isFinite(b)) continue;
+      // relative to the stored value, floored at 0.5% of price so values near
+      // zero (MACD histogram) don't blow up the percentage.
+      const denom = Math.max(Math.abs(b), Math.abs(close) * 0.005, 1e-9);
+      const pct = Math.abs(a - b) / denom * 100;
+      const s = stats.get(col) ?? { n: 0, over01: 0, over1: 0, maxPct: 0 };
+      s.n++;
+      if (pct > 0.1) s.over01++;
+      if (pct > 1) s.over1++;
+      s.maxPct = Math.max(s.maxPct, pct);
+      stats.set(col, s);
     }
   }
 
-  // OBV divergence over 20 sessions: price and OBV moving opposite ways.
-  let div: string | null = null;
-  if (bars.length > 20) {
-    const pBase = closes[closes.length - 21];
-    const priceChgPct = pBase > 0 ? (last / pBase - 1) * 100 : 0;
-    const obvChg = obv[obv.length - 1] - obv[obv.length - 21];
-    if (priceChgPct > 2 && obvChg < 0) div = "bearish_divergence";
-    else if (priceChgPct < -2 && obvChg > 0) div = "bullish_divergence";
+  console.log(`\nVERIFY ${date}: compared ${compared} symbols`);
+  console.log(`signal label identical: ${signalSame}/${compared}`);
+  console.log("column           compared  >0.1%  >1%   max%");
+  for (const col of NUM_COLS) {
+    const s = stats.get(col);
+    if (!s) { console.log(`${String(col).padEnd(16)} (no comparable values)`); continue; }
+    console.log(
+      `${String(col).padEnd(16)} ${String(s.n).padStart(8)} ${String(s.over01).padStart(6)} ${String(s.over1).padStart(5)} ${s.maxPct.toFixed(2).padStart(7)}`,
+    );
   }
-
-  return {
-    computed_on: bars[bars.length - 1].traded_on,
-    sma_20: orNull(s20), sma_50: orNull(s50), sma_200: orNull(s200),
-    ema_12: round(ema12[ema12.length - 1]),
-    ema_26: round(ema26[ema26.length - 1]),
-    ema_50: round(ema50[ema50.length - 1]),
-    rsi_14: orNull(rsi),
-    macd_line: round(macd), macd_signal: round(macdSig),
-    macd_histogram: round(macd - macdSig),
-    bb_upper: orNull(bbU), bb_middle: orNull(s20), bb_lower: orNull(bbL),
-    atr_14: orNull(atr14(bars)),
-    obv: Math.round(obv[obv.length - 1]),
-    vwap: orNull(vwap20(bars)),
-    support: orNull(support), resistance: orNull(resistance),
-    signal, signal_score: score,
-    rel_strength_1m: orNull(rel, 2),
-    obv_divergence: div,
-  };
+  console.log("\nColumns with many >1% diffs use a different definition than mine;");
+  console.log("paste this output back and the definition can be aligned.");
 }
+
+// ------------------------------------------------------------------ run ---
+async function run(backfill: number, dry: boolean): Promise<string> {
+  const { cols, timeframe } = await tableColumns();
+  const symbols = await activeSymbols();
+  const idx = await loadIndexLookup();
+
+  const rows: Record<string, unknown>[] = [];
+  let skipped = 0, rsPopulated = 0;
+  const dropped = new Set<string>();
+
+  for (const sym of symbols) {
+    const bars = await loadBars(sym);
+    if (bars.length < 20) { skipped++; continue; }
+    for (let k = 0; k < backfill; k++) {
+      const end = bars.length - k;
+      if (end < 20) break;
+      const r = computeIndicators(bars.slice(0, end), idx);
+      if (!r) continue;
+      if (r.rel_strength_1m !== null) rsPopulated++;
+      const full: Record<string, unknown> = { symbol: sym, timeframe, ...r };
+      const row: Record<string, unknown> = {};
+      for (const [key, val] of Object.entries(full)) {
+        if (cols.has(key)) row[key] = val; else dropped.add(key);
+      }
+      rows.push(row);
+    }
+  }
+  if (!rows.length) throw new Error("no indicator rows computed (no historical_prices?)");
+
+  const dates = [...new Set(rows.map((r) => r.computed_on as string))].sort();
+  const counts: Record<string, number> = {};
+  for (const r of rows) counts[r.signal as string] = (counts[r.signal as string] ?? 0) + 1;
+
+  const newest = dates[dates.length - 1];
+  const ageDays = (Date.now() - new Date(newest).getTime()) / 86400000;
+  if (ageDays > 6) console.warn(`[warn] newest bar is ${newest} (${ageDays.toFixed(0)}d old) -- did the EOD sync run?`);
+  if (dropped.size) console.warn(`[warn] not in table, skipped: ${[...dropped].join(", ")}`);
+  const stored = new Set(Object.keys(rows[0]));
+  const uncomputed = [...cols].filter((c) =>
+    !stored.has(c) && !["id", "created_at", "updated_at"].includes(c)
+  );
+  if (uncomputed.length) console.warn(`[warn] table columns this job does not fill: ${uncomputed.join(", ")}`);
+
+  const detail =
+    `indicators: ${rows.length} rows, ${symbols.length - skipped}/${symbols.length} symbols, ` +
+    `dates ${dates[0]}..${newest}, rs ${rsPopulated}/${rows.length}, signals ${JSON.stringify(counts)}`;
+
+  if (dry) { console.log(`[dry-run] ${detail}`); console.log(rows[0]); return `dry-run ${detail}`; }
+
+  // delete-then-insert per date (no assumption about a unique constraint)
+  const byDate = new Map<string, Record<string, unknown>[]>();
+  for (const r of rows) {
+    const d = r.computed_on as string;
+    byDate.set(d, [...(byDate.get(d) ?? []), r]);
+  }
+  for (const [date, rs] of byDate) {
+    for (let i = 0; i < rs.length; i += 100) {
+      const chunk = rs.slice(i, i + 100);
+      const del = await SB.from("technical_indicators").delete()
+        .eq("computed_on", date).eq("timeframe", timeframe)
+        .in("symbol", chunk.map((r) => r.symbol as string));
+      if (del.error) throw del.error;
+      const ins = await SB.from("technical_indicators").insert(chunk);
+      if (ins.error) throw ins.error;
+    }
+  }
+  return detail;
+}
+
+async function main() {
+  // Always print something, so a silent run can never look like success.
+  console.log(`indicators.ts started, args=${JSON.stringify(Deno.args)}`);
+  const verifyDate = opt("--verify");
+  if (verifyDate) { await verify(verifyDate); return; }
+  const dry = flag("--dry-run");
+  const backfill = Math.max(1, Math.min(60, Number(opt("--backfill") ?? 1) || 1));
+  try {
+    const detail = await run(backfill, dry);
+    if (!dry) await SB.from("sync_log").insert({ job: "indicators", status: "ok", detail });
+    console.log(`OK: ${detail}`);
+  } catch (e) {
+    const msg = String((e as { message?: string })?.message ?? e).slice(0, 500);
+    if (!dry) await SB.from("sync_log").insert({ job: "indicators", status: "error", detail: msg });
+    console.error(`ERROR: ${msg}`);
+    Deno.exit(1);
+  }
+}
+
+main();
