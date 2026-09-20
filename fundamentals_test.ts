@@ -17,7 +17,7 @@ const cells = (xs: string[]) => xs.map((x) => `<td>${x}</td>`).join("");
 const section = (labels: string[], values: string[]) =>
   `<table><tr>${cells(labels)}</tr><tr>${cells(values)}</tr></table><p>filler text between sections</p>`;
 
-// A healthy company: EPS 12.5, P/E 8.2, P/B 1.3, ROE 15.2, yield 6.5%, D/E 0.9
+// A healthy company: annual EPS 11.8 (latest part-year EPS 12.5), P/E 8.2, P/B 1.3, ROE 15.2, yield 6.5%, D/E 0.9
 const EARN = ["Rs. 12.50", "Rs. 3.10", "Rs. 11.80", "8.20x", "7.10x", "12.00 %", "0.70x"];
 const EQ = ["Rs. 85.00", "Rs. 90.00", "10.00 %", "9.00 %", "1.30x", "1.20x", "15.20 %",
   "14.00 %", "40.00 %", "42.00 %", "55.00 %", "8.00 %", "12.00 %"];
@@ -35,7 +35,7 @@ const page = (o: { earn?: string[]; eq?: string[]; div?: string[]; solv?: string
 Deno.test("healthy page extracts every value", () => {
   const { ratios, rejected } = extractRatios(page());
   assert(rejected.length === 0, `no rejections, got ${rejected}`);
-  assert(ratios.eps === 12.5, `eps ${ratios.eps}`);
+  assert(ratios.eps === 11.8, `eps (last ANNUAL) ${ratios.eps}`);
   assert(ratios.peRatio === 8.2, `pe ${ratios.peRatio}`);
   assert(ratios.pbRatio === 1.3, `pb ${ratios.pbRatio}`);
   assert(ratios.roe === 15.2, `roe ${ratios.roe}`);
@@ -45,7 +45,7 @@ Deno.test("healthy page extracts every value", () => {
 
 Deno.test("thousands separator: 'Rs. 1,234.50' is 1234.5, not 1", () => {
   assert(numFromToken("Rs. 1,234.50") === 1234.5, "comma handled");
-  const { ratios } = extractRatios(page({ earn: ["Rs. 1,234.50", ...EARN.slice(1)] }));
+  const { ratios } = extractRatios(page({ earn: [EARN[0], EARN[1], "Rs. 1,234.50", ...EARN.slice(3)] }));
   assert(ratios.eps === 1234.5, `eps ${ratios.eps}`);
   assert(ratios.peRatio === 8.2, "later columns stay aligned");
 });
@@ -53,7 +53,7 @@ Deno.test("thousands separator: 'Rs. 1,234.50' is 1234.5, not 1", () => {
 Deno.test("negative EPS keeps tokens aligned (was: every later value shifted left)", () => {
   const earn = ["Rs. -5.20", "Rs. -1.10", "Rs. -4.00", "8.20x", "7.10x", "12.00 %", "0.70x"];
   const { ratios, rejected } = extractRatios(page({ earn }));
-  assert(ratios.eps === -5.2, `eps ${ratios.eps}`);
+  assert(ratios.eps === -4, `eps ${ratios.eps}`);
   // loss-maker never keeps a P/E
   assert(ratios.peRatio === null && rejected.includes("peRatio:loss"), "P/E dropped for loss-maker");
   assert(ratios.roe === 15.2 && ratios.pbRatio === 1.3, "other rows unaffected");
