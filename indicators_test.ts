@@ -199,3 +199,11 @@ Deno.test("OBV divergence: price up + volume only on down days => bearish", () =
   const r = computeIndicators(bars)!;
   assert(r.obv_divergence === "bearish_divergence", `expected bearish, got ${r.obv_divergence}`);
 });
+
+Deno.test("EMA50 / SMA50 are null with fewer than 50 bars, present from 50", () => {
+  const bars = makeBars(21, 60, 500000);
+  const short = computeIndicators(bars.slice(0, 49))!;
+  assert(short.ema_50 === null && short.sma_50 === null, "49 bars -> null EMA50/SMA50");
+  const ok = computeIndicators(bars.slice(0, 50))!;
+  assert(ok.ema_50 !== null && ok.sma_50 !== null, "50 bars -> present");
+});
