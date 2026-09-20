@@ -102,9 +102,12 @@ export interface Ratios {
   dividendYield: number | null;
 }
 
-// field -> [row index, required unit (null = any), min, max]
+// field -> position in its row, required unit (null = any), min, max
 const SPEC = {
-  eps:           { idx: 0, kind: "rs",  lo: -5000, hi: 20000 },
+  // idx 2 = "Last Annual EPS Upto" (full fiscal year). idx 0 ("Latest EPS Upto")
+  // is a cumulative PART-year figure (quarter / half-year), so it is ~2-4x smaller
+  // than the EPS behind P/E and is not comparable.
+  eps:           { idx: 2, kind: "rs",  lo: -5000, hi: 20000 },
   peRatio:       { idx: 3, kind: "x",   lo: -1000, hi: 2000 },
   pbRatio:       { idx: 4, kind: "x",   lo: -100,  hi: 500 },
   roe:           { idx: 6, kind: "pct", lo: -500,  hi: 500 },
