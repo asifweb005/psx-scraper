@@ -260,7 +260,14 @@ async function main() {
     const msg = String(e).slice(0, 500);
     await SB.from("sync_log").insert({ job: `psx-sync:${action}`, status: "error", detail: msg });
     console.error(`❌ Error: ${msg}`);
-    Deno.exit(1); 
+    
+    // If it's a known PSX block or a closed market, exit cleanly (0) so GitHub doesn't show a red failure.
+    if (msg.includes("FEED BLOCKED") || msg.includes("No fresh quotes")) {
+      console.log("ℹ️ Exiting cleanly to prevent GitHub Actions failure spam.");
+      Deno.exit(0); 
+    } else {
+      Deno.exit(1); 
+    }
   }
 }
 
