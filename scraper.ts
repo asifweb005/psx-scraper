@@ -19,29 +19,41 @@ function getStealthHeaders() {
   };
 }
 
-// 1. Back to the clean JSON API! No proxies, no HTML parsing.
+// 1. Back to the clean JSON API! Using Proxy Rotation to bypass GitHub IP bans.
 async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
   
   const sep = path.includes("?") ? "&" : "?";
-  const url = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
+  const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
   
-  let r: Response;
-  try {
-    r = await fetch(url, { headers: getStealthHeaders(), signal: AbortSignal.timeout(timeoutMs) });
-  } catch (e) {
-    diagnosticReason = `Fetch failed on ${path}: ${String(e).slice(0, 120)}`;
-    if (++consecutiveBlocks >= BREAKER_THRESHOLD) breakerTripped = true;
-    throw new Error(diagnosticReason);
+  // We rotate through free proxy gateways to hide the GitHub IP from the PSX firewall
+  const urlsToTry = [
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+    `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+    targetUrl // Fallback to direct attempt
+  ];
+
+  let r: Response | null = null;
+  let lastError = "";
+
+  for (const url of urlsToTry) {
+    try {
+      r = await fetch(url, { 
+        headers: getStealthHeaders(), 
+        signal: AbortSignal.timeout(timeoutMs) 
+      });
+      
+      if (r.ok) {
+        consecutiveBlocks = 0;
+        const raw = await r.json();
+        return Array.isArray(raw) ? raw : (raw?.data ?? []);
+      }
+    } catch (e) {
+      lastError = String(e).slice(0, 120);
+    }
   }
   
-  if (r.ok) {
-    consecutiveBlocks = 0;
-    const raw = await r.json();
-    return Array.isArray(raw) ? raw : (raw?.data ?? []);
-  }
-  
-  diagnosticReason = `PSX Block: HTTP ${r.status} on ${path}`;
+  diagnosticReason = `PSX Block: All routes failed. Last HTTP: ${r?.status || lastError}`;
   if (++consecutiveBlocks >= BREAKER_THRESHOLD) {
     breakerTripped = true;
     diagnosticReason = `PSX blocked ${BREAKER_THRESHOLD} requests -- aborting.`;
@@ -165,7 +177,7 @@ async function syncQuotes(): Promise<string> {
   const { error } = await SB.from("market_quotes").upsert(rows);
   if (error) throw error;
 
-  return `upserted ${rows.length}/${syms.length} fresh quotes ${holding > 0 ? `(${holding} held)` : ""}`;
+  return `upserted ${rows.length}/${syms.length} fresh quotes ${holding > 0 ? \`(\${holding} held)\` : ""}`;
 }
 
 async function syncIndex(): Promise<string> {
