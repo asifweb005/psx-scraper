@@ -4,6 +4,7 @@
   "type": "commonjs",
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
-    "puppeteer": "^23.0.0"
+    "puppeteer": "^23.0.0",
+    "ws": "^8.18.0"
   }
 }
