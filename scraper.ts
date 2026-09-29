@@ -12,7 +12,7 @@ const BREAKER_THRESHOLD = 15;
 
 // 1. Private Google Server Proxy (Bypasses Cloudflare & Geo-blocks)
 // PASTE YOUR GOOGLE SCRIPT URL HERE:
-const GOOGLE_PROXY = "https://script.google.com/macros/s/AKfycbxrLBJreQnheCy4KUDuVl49Xn7W8WE22gD2ErMAwo8iQ-TK8oZFQ6K3rfAAglgRPQzJ/exec";
+const GOOGLE_PROXY = "https://script.google.com/macros/s/AKfycbx5UEZ0Fu_XMFqaGWaVUsL6GyqO1EJCDhURavKWGH-wGVUgwV_JUouBsoiqH4krQYOG/exec";
 
 async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
