@@ -90,8 +90,42 @@ async function main() {
 
     console.log(`Scraping ${syms.length} symbols in high-speed parallel batches...`);
 
-    const freshQuotes = await pmap(syms, 10, async (sym) => {
+const freshQuotes = await pmap(syms, 10, async (sym) => {
       try {
+        const currentUtc = new Date().getUTCHours();
+        // The Pakistan market closes at 3:30 PM PKT (10:30 AM UTC). 
+        // If it's after 10:45 AM UTC, we consider the market closed and fetch EOD data.
+        const isMarketClosed = currentUtc >= 10 && new Date().getUTCMinutes() >= 45 || currentUtc > 10;
+        
+        const bar = barsMap.get(sym);
+        const ldcpFromBar = bar ? (bar.traded_on === today ? (bar.prev_close ?? bar.close) : bar.close) : 0;
+
+        // If the market is closed, ALWAYS use the official EOD endpoint for accurate closing prices
+        if (isMarketClosed) {
+          const eod = await psxJson(`/timeseries/eod/${sym}`);
+          if (eod.length) {
+            const rec = eod[0];
+            const eodDate = new Date(Number(rec[0]) * 1000);
+            eodDate.setUTCHours(eodDate.getUTCHours() + 5);
+            
+            if (eodDate.toISOString().slice(0, 10) === today) {
+              const close = Number(rec[1]);
+              const volume = Number(rec[2]);
+              const open = Number(rec[3]) || close;
+              const high = Number(rec[4]) || Math.max(open, close);
+              const low = Number(rec[5]) || Math.min(open, close);
+              const base = ldcpFromBar || open;
+              return {
+                symbol: sym, last: close, open, high, low, volume, ldcp: base,
+                change: Math.round((close - base) * 100) / 100,
+                change_pct: base ? Math.round(((close - base) / base) * 100 * 100) / 100 : 0,
+                fresh: true
+              };
+            }
+          }
+        }
+
+        // If market is open (or EOD data for today isn't published yet), use intraday ticks
         let intraday = await psxJson(`/timeseries/int/${sym}`);
         if (intraday.length) {
           const tickDate = new Date(Number(intraday[0][0]) * 1000);
@@ -99,63 +133,37 @@ async function main() {
           if (tickDate.toISOString().slice(0, 10) !== today) intraday = [];
         }
 
-        const bar = barsMap.get(sym);
-        const ldcpFromBar = bar ? (bar.traded_on === today ? (bar.prev_close ?? bar.close) : bar.close) : 0;
-
-        if (!intraday.length) {
-          const currentUtc = new Date().getUTCHours();
-          const isMarketOpen = currentUtc >= 4 && currentUtc < 11;
-          if (!isMarketOpen) {
-            const eod = await psxJson(`/timeseries/eod/${sym}`);
-            if (eod.length) {
-              const rec = eod[0];
-              const eodDate = new Date(Number(rec[0]) * 1000);
-              eodDate.setUTCHours(eodDate.getUTCHours() + 5);
-              if (eodDate.toISOString().slice(0, 10) === today) {
-                const close = Number(rec[1]);
-                const volume = Number(rec[2]);
-                const open = Number(rec[3]) || close;
-                const high = Number(rec[4]) || Math.max(open, close);
-                const low = Number(rec[5]) || Math.min(open, close);
-                const base = ldcpFromBar || open;
-                return {
-                  symbol: sym, last: close, open, high, low, volume, ldcp: base,
-                  change: Math.round((close - base) * 100) / 100,
-                  change_pct: base ? Math.round(((close - base) / base) * 100 * 100) / 100 : 0,
-                  fresh: true
-                };
-              }
-            }
+        if (intraday.length) {
+          let high = -Infinity, low = Infinity, volume = 0;
+          for (const t of intraday) {
+            const p = Number(t[1]);
+            if (p <= 0) continue;
+            if (p > high) high = p;
+            if (p < low) low = p;
+            volume += Number(t[2]);
           }
-          if (bar) {
-            const base = bar.prev_close ?? bar.close;
+          const last = Number(intraday[0][1]);
+          const open = Number(intraday[intraday.length - 1][1]);
+          if (last > 0) {
+            const base = ldcpFromBar || open;
             return {
-              symbol: sym, last: bar.close, open: bar.close, high: bar.close, low: bar.close, volume: 0,
-              ldcp: base, change: 0, change_pct: 0, fresh: false
+              symbol: sym, last, open, high, low, volume, ldcp: base,
+              change: Math.round((last - base) * 100) / 100,
+              change_pct: base ? Math.round(((last - base) / base) * 100 * 100) / 100 : 0,
+              fresh: true
             };
           }
-          return null;
         }
 
-        let high = -Infinity, low = Infinity, volume = 0;
-        for (const t of intraday) {
-          const p = Number(t[1]);
-          if (p <= 0) continue;
-          if (p > high) high = p;
-          if (p < low) low = p;
-          volume += Number(t[2]);
-        }
-        const last = Number(intraday[0][1]);
-        const open = Number(intraday[intraday.length - 1][1]);
-        if (last > 0) {
-          const base = ldcpFromBar || open;
+        // Fallback: No data for today, return the previous day's close
+        if (bar) {
+          const base = bar.prev_close ?? bar.close;
           return {
-            symbol: sym, last, open, high, low, volume, ldcp: base,
-            change: Math.round((last - base) * 100) / 100,
-            change_pct: base ? Math.round(((last - base) / base) * 100 * 100) / 100 : 0,
-            fresh: true
+            symbol: sym, last: bar.close, open: bar.close, high: bar.close, low: bar.close, volume: 0,
+            ldcp: base, change: 0, change_pct: 0, fresh: false
           };
         }
+        
       } catch (err) {
         return null;
       }
