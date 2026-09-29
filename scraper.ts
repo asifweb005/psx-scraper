@@ -8,50 +8,37 @@ const SB = createClient(
 let diagnosticReason = "Unknown error. Could not fetch valid data.";
 let consecutiveBlocks = 0;
 let breakerTripped = false;
-const BREAKER_THRESHOLD = 10; // Increased tolerance
+const BREAKER_THRESHOLD = 5;
 
-// 1. Private Google POST Proxy
-// REPLACE THE ASTERISKS WITH YOUR ACTUAL GOOGLE WEB APP URL:
-const GOOGLE_PROXY = "https://script.google.com/macros/s/AKfycbyoeMgLqK49DzHTMmdb7KNo-bwCaGOZdEYV8MEvHISixmYv36faxSPLHIjT3x6ITkfn/exec";
-
-// CRITICAL FIX: Increased timeout to 60 seconds to allow Google Apps Script to cold-start and fetch without being interrupted.
-async function psxJson(path: string, timeoutMs = 60000): Promise<unknown[]> {
+// Direct Fetch (Executes cleanly on your Residential IP)
+async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
   
   const sep = path.includes("?") ? "&" : "?";
   const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
 
   try {
-    const r = await fetch(GOOGLE_PROXY, { 
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: targetUrl }),
-      redirect: "follow", 
+    const r = await fetch(targetUrl, { 
+      headers: { 
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://dps.psx.com.pk/"
+      },
       signal: AbortSignal.timeout(timeoutMs) 
     });
     
-    const text = await r.text();
-    const trimmed = text.trim();
-    
-    if (r.ok && (trimmed.startsWith("[") || trimmed.startsWith("{"))) {
-      const parsed = JSON.parse(trimmed);
-      
-      if (parsed.error) {
-        diagnosticReason = `Google Apps Script Error: ${parsed.error}`;
-      } else {
-        const finalArray = Array.isArray(parsed) ? parsed : (parsed?.data ?? null);
-        if (finalArray && Array.isArray(finalArray)) {
-          consecutiveBlocks = 0; 
-          return finalArray;
-        } else {
-          diagnosticReason = "PSX returned JSON, but the data array was missing.";
-        }
+    if (r.ok) {
+      const parsed = await r.json();
+      const finalArray = Array.isArray(parsed) ? parsed : (parsed?.data ?? null);
+      if (finalArray && Array.isArray(finalArray)) {
+        consecutiveBlocks = 0; 
+        return finalArray;
       }
-    } else {
-      diagnosticReason = `Proxy returned unexpected format. HTTP: ${r.status}. Snippet: ${trimmed.slice(0, 80).replace(/\n/g, ' ')}`;
     }
+    diagnosticReason = `PSX HTTP Error: ${r.status}`;
   } catch (e) {
-    diagnosticReason = `Proxy Fetch Failed: ${String(e).slice(0, 100)}`;
+    diagnosticReason = `Fetch Failed: ${String(e).slice(0, 100)}`;
   }
   
   if (++consecutiveBlocks >= BREAKER_THRESHOLD) {
@@ -157,9 +144,7 @@ async function syncQuotes(): Promise<string> {
   const syms = await trackedSymbols();
   const bars = await latestBars();
   
-  // CRITICAL FIX: Pacing set to 1 request every 2 seconds. 
-  // This prevents Google Apps Script from throttling concurrent executions.
-  const quotes = await pmap(syms, 1, (s) => buildQuote(s, bars.get(s)), 2000);
+  const quotes = await pmap(syms, 4, (s) => buildQuote(s, bars.get(s)), 500);
 
   if (!quotes.length) throw new Error(diagnosticReason);
 
