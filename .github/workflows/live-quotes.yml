@@ -6,7 +6,7 @@ on:
 
 jobs:
   sync:
-    runs-on: macos-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
