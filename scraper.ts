@@ -10,53 +10,52 @@ let consecutiveBlocks = 0;
 let breakerTripped = false;
 const BREAKER_THRESHOLD = 6;
 
-function getStealthHeaders() {
-  return {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-    "Referer": "https://dps.psx.com.pk/",
-    "X-Requested-With": "XMLHttpRequest",
-  };
-}
-
-// 1. Proxy Rotation to bypass GitHub IP bans
-async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> {
+// 1. Bulletproof Proxy Routing
+async function psxJson(path: string, timeoutMs = 8000): Promise<unknown[]> { // Lowered to 8s to bypass hangs quickly
   if (breakerTripped) throw new Error(diagnosticReason);
   
   const sep = path.includes("?") ? "&" : "?";
   const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
   
-  // Rotate through public proxies so PSX sees their IP, not GitHub's IP
-  const urlsToTry = [
-    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
-    targetUrl // Fallback to direct attempt
+  const routes = [
+    // Route 1: AllOrigins JSON Wrapper (Highly reliable, bypasses CORS and Cloudflare checks)
+    { url: `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`, wrap: true },
+    // Route 2: CodeTabs Raw Proxy
+    { url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`, wrap: false },
+    // Route 3: Direct attempt (in case the ban lifts)
+    { url: targetUrl, wrap: false }
   ];
 
   let r: Response | null = null;
   let lastError = "";
 
-  for (const url of urlsToTry) {
+  for (const route of routes) {
     try {
-      r = await fetch(url, { 
-        headers: getStealthHeaders(), 
-        signal: AbortSignal.timeout(timeoutMs) 
-      });
+      // IMPORTANT: We do NOT send a fake Chrome User-Agent. 
+      // Cloudflare drops requests when a server's TLS fingerprint fakes a desktop browser.
+      r = await fetch(route.url, { signal: AbortSignal.timeout(timeoutMs) });
       
       if (r.ok) {
         consecutiveBlocks = 0;
-        const raw = await r.json();
-        return Array.isArray(raw) ? raw : (raw?.data ?? []);
+        const resJson = await r.json();
+        
+        let finalData = resJson;
+        // Unpack AllOrigins wrapped response
+        if (route.wrap && resJson.contents) {
+          finalData = JSON.parse(resJson.contents);
+        }
+        
+        return Array.isArray(finalData) ? finalData : (finalData?.data ?? []);
       }
     } catch (e) {
-      lastError = String(e).slice(0, 120);
+      lastError = String(e).slice(0, 100);
     }
   }
   
-  diagnosticReason = `PSX Block: All proxy routes failed. Last HTTP: ${r?.status || lastError}`;
+  diagnosticReason = `All proxies blocked/timed out. Last error: ${r?.status || lastError}`;
   if (++consecutiveBlocks >= BREAKER_THRESHOLD) {
     breakerTripped = true;
-    diagnosticReason = `PSX blocked ${BREAKER_THRESHOLD} requests -- aborting.`;
+    diagnosticReason = `PSX blocked ${BREAKER_THRESHOLD} times -- aborting.`;
   }
   throw new Error(diagnosticReason);
 }
@@ -177,7 +176,7 @@ async function syncQuotes(): Promise<string> {
   const { error } = await SB.from("market_quotes").upsert(rows);
   if (error) throw error;
 
-  return `upserted ${rows.length}/${syms.length} fresh quotes ${holding > 0 ? `(${holding} held)` : ""}`;
+  return `upserted ${rows.length}/${syms.length} fresh quotes ${holding > 0 ? \`(\${holding} held)\` : ""}`;
 }
 
 async function syncIndex(): Promise<string> {
