@@ -172,11 +172,12 @@ async function syncQuotes(): Promise<string> {
     );
   }
 
-  const rows = fresh.map((q) => ({ symbol: q.symbol, last_price: q.last, change: q.change, change_pct: q.change_pct, open: q.open, high: q.high, low: q.low, volume: q.volume, ldcp: q.ldcp, refreshed_at: new Date().toISOString() }));
+const rows = fresh.map((q) => ({ symbol: q.symbol, last_price: q.last, change: q.change, change_pct: q.change_pct, open: q.open, high: q.high, low: q.low, volume: q.volume, ldcp: q.ldcp, refreshed_at: new Date().toISOString() }));
   const { error } = await SB.from("market_quotes").upsert(rows);
   if (error) throw error;
 
-  return `upserted ${rows.length}/${syms.length} fresh quotes ${holding > 0 ? \`(\${holding} held)\` : ""}`;
+  // Replace the old return line with this exact line:
+  return `upserted ${rows.length}/${syms.length} fresh quotes ${holding > 0 ? "(" + holding + " held)" : ""}`;
 }
 
 async function syncIndex(): Promise<string> {
