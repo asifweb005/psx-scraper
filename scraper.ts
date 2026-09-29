@@ -10,70 +10,51 @@ let consecutiveBlocks = 0;
 let breakerTripped = false;
 const BREAKER_THRESHOLD = 15;
 
-// 1. Bulletproof Proxy Routing with Strict Validation & Diagnostics
-async function psxJson(path: string, timeoutMs = 12000): Promise<unknown[]> {
+// 1. Private Google Server Proxy (Bypasses Cloudflare & Geo-blocks)
+// PASTE YOUR GOOGLE SCRIPT URL HERE:
+const GOOGLE_PROXY = "https://script.google.com/macros/s/AKfycbxrLBJreQnheCy4KUDuVl49Xn7W8WE22gD2ErMAwo8iQ-TK8oZFQ6K3rfAAglgRPQzJ/exec";
+
+async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
-
+  
+  // Only add cache buster if we are hitting PSX directly. Google handles caching differently.
   const sep = path.includes("?") ? "&" : "?";
-  // Rapid cache-busting to ensure we don't hit a cached Cloudflare 403 page
-  const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 10000)}`;
+  const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
+  
+  // Route the request through your private Google Apps Script
+  const fetchUrl = `${GOOGLE_PROXY}?url=${encodeURIComponent(targetUrl)}`;
 
-  const routes = [
-    { name: "AllOrigins", url: `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`, wrap: true },
-    { name: "CodeTabs", url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`, wrap: false },
-    { name: "CorsProxy", url: `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`, wrap: false },
-    { name: "Direct", url: targetUrl, wrap: false }
-  ];
-
-  const headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-  };
-
-  const errors: string[] = [];
-
-  for (const route of routes) {
-    try {
-      const r = await fetch(route.url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  let r: Response | null = null;
+  try {
+    r = await fetch(fetchUrl, { signal: AbortSignal.timeout(timeoutMs) });
+    
+    if (r.ok) {
       const text = await r.text();
-
-      if (r.ok) {
-        let parsed = null;
-        try {
-          parsed = JSON.parse(text);
-          // Unpack AllOrigins wrapper safely
-          if (route.wrap && parsed && parsed.contents) {
-            if (parsed.status?.http_code !== 200) {
-              errors.push(`${route.name} hit PSX HTTP ${parsed.status?.http_code}`);
-              continue;
-            }
-            parsed = JSON.parse(parsed.contents);
-          }
-        } catch (e) {
-          errors.push(`${route.name} ParseError (Cloudflare Captcha?)`);
-          continue;
-        }
-
+      const trimmed = text.trim();
+      
+      // Verify Google returned JSON and not an error page
+      if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+        const parsed = JSON.parse(trimmed);
         const finalArray = Array.isArray(parsed) ? parsed : (parsed?.data ?? null);
+        
         if (finalArray && Array.isArray(finalArray)) {
-          consecutiveBlocks = 0; // Reset breaker on success
+          consecutiveBlocks = 0; // Reset breaker
           return finalArray;
-        } else {
-           errors.push(`${route.name} Invalid JSON`);
         }
-      } else {
-        errors.push(`${route.name} HTTP ${r.status}`);
       }
-    } catch (e) {
-      errors.push(`${route.name} ${String(e).replace('Error: ', '').slice(0, 30)}`);
+      diagnosticReason = "Google Proxy returned invalid JSON payload.";
+    } else {
+      diagnosticReason = `Google Proxy HTTP Error: ${r.status}`;
     }
+  } catch (e) {
+    diagnosticReason = `Google Proxy Failed: ${String(e).slice(0, 100)}`;
   }
-
-  diagnosticReason = `All routes failed. Details: ${errors.join(" | ")}`;
+  
   if (++consecutiveBlocks >= BREAKER_THRESHOLD) {
     breakerTripped = true;
-    diagnosticReason = `BREAKER TRIPPED. Last: ${errors.join(" | ")}`;
+    diagnosticReason = `BREAKER TRIPPED. Last Error: ${diagnosticReason}`;
   }
+  
   throw new Error(diagnosticReason);
 }
 
