@@ -8,20 +8,20 @@ const SB = createClient(
 let diagnosticReason = "Unknown error. Could not fetch valid data.";
 let consecutiveBlocks = 0;
 let breakerTripped = false;
-const BREAKER_THRESHOLD = 8;
+const BREAKER_THRESHOLD = 10; // Increased tolerance
 
-// 1. Private Google POST Proxy (Bypasses Google HTML Security Walls & PSX Cloudflare)
+// 1. Private Google POST Proxy
 // REPLACE THE ASTERISKS WITH YOUR ACTUAL GOOGLE WEB APP URL:
 const GOOGLE_PROXY = "https://script.google.com/macros/s/AKfycbyoeMgLqK49DzHTMmdb7KNo-bwCaGOZdEYV8MEvHISixmYv36faxSPLHIjT3x6ITkfn/exec";
 
-async function psxJson(path: string, timeoutMs = 20000): Promise<unknown[]> {
+// CRITICAL FIX: Increased timeout to 60 seconds to allow Google Apps Script to cold-start and fetch without being interrupted.
+async function psxJson(path: string, timeoutMs = 60000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
   
   const sep = path.includes("?") ? "&" : "?";
   const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
 
   try {
-    // Send a POST request with a JSON body to completely bypass Google's Open Redirect scanners
     const r = await fetch(GOOGLE_PROXY, { 
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -36,7 +36,6 @@ async function psxJson(path: string, timeoutMs = 20000): Promise<unknown[]> {
     if (r.ok && (trimmed.startsWith("[") || trimmed.startsWith("{"))) {
       const parsed = JSON.parse(trimmed);
       
-      // Handle the case where Google's catch block returns a JSON error
       if (parsed.error) {
         diagnosticReason = `Google Apps Script Error: ${parsed.error}`;
       } else {
@@ -158,8 +157,9 @@ async function syncQuotes(): Promise<string> {
   const syms = await trackedSymbols();
   const bars = await latestBars();
   
-  // Safe pacing
-  const quotes = await pmap(syms, 2, (s) => buildQuote(s, bars.get(s)), 800);
+  // CRITICAL FIX: Pacing set to 1 request every 2 seconds. 
+  // This prevents Google Apps Script from throttling concurrent executions.
+  const quotes = await pmap(syms, 1, (s) => buildQuote(s, bars.get(s)), 2000);
 
   if (!quotes.length) throw new Error(diagnosticReason);
 
