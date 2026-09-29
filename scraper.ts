@@ -8,51 +8,56 @@ const SB = createClient(
 let diagnosticReason = "Unknown error. Could not fetch valid data.";
 let consecutiveBlocks = 0;
 let breakerTripped = false;
-const BREAKER_THRESHOLD = 6;
+const BREAKER_THRESHOLD = 15;
 
-// 1. Bulletproof Proxy Routing
-async function psxJson(path: string, timeoutMs = 8000): Promise<unknown[]> { // Lowered to 8s to bypass hangs quickly
+// 1. Bulletproof Proxy Routing with Strict JSON Validation
+async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> { 
   if (breakerTripped) throw new Error(diagnosticReason);
   
   const sep = path.includes("?") ? "&" : "?";
   const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
   
+  // A wide net of public CORS proxies to spread the load and bypass IP bans
   const routes = [
-    // Route 1: AllOrigins JSON Wrapper (Highly reliable, bypasses CORS and Cloudflare checks)
-    { url: `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`, wrap: true },
-    // Route 2: CodeTabs Raw Proxy
-    { url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`, wrap: false },
-    // Route 3: Direct attempt (in case the ban lifts)
-    { url: targetUrl, wrap: false }
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`,
+    `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+    `https://thingproxy.freeboard.io/fetch/${targetUrl}`,
+    targetUrl // Direct fallback
   ];
 
-  let r: Response | null = null;
   let lastError = "";
 
   for (const route of routes) {
     try {
-      // IMPORTANT: We do NOT send a fake Chrome User-Agent. 
-      // Cloudflare drops requests when a server's TLS fingerprint fakes a desktop browser.
-      r = await fetch(route.url, { signal: AbortSignal.timeout(timeoutMs) });
+      const r = await fetch(route, { 
+        headers: { "Accept": "application/json" },
+        signal: AbortSignal.timeout(timeoutMs) 
+      });
       
       if (r.ok) {
-        consecutiveBlocks = 0;
-        const resJson = await r.json();
+        const resText = await r.text();
         
-        let finalData = resJson;
-        // Unpack AllOrigins wrapped response
-        if (route.wrap && resJson.contents) {
-          finalData = JSON.parse(resJson.contents);
+        // CRITICAL: Cloudflare often returns HTTP 200 with an HTML captcha page. 
+        // We must strictly verify it's a JSON array or object before accepting it.
+        const trimmed = resText.trim();
+        if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+          const resJson = JSON.parse(trimmed);
+          consecutiveBlocks = 0; // Reset breaker on success
+          return Array.isArray(resJson) ? resJson : (resJson?.data ?? []);
+        } else {
+          lastError = "Proxy returned HTML/Captcha instead of JSON";
+          continue; // Move to the next proxy
         }
-        
-        return Array.isArray(finalData) ? finalData : (finalData?.data ?? []);
+      } else {
+        lastError = `HTTP ${r.status}`;
       }
     } catch (e) {
       lastError = String(e).slice(0, 100);
     }
   }
   
-  diagnosticReason = `All proxies blocked/timed out. Last error: ${r?.status || lastError}`;
+  diagnosticReason = `All proxies blocked/timed out. Last error: ${lastError}`;
   if (++consecutiveBlocks >= BREAKER_THRESHOLD) {
     breakerTripped = true;
     diagnosticReason = `PSX blocked ${BREAKER_THRESHOLD} times -- aborting.`;
