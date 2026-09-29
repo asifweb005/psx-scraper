@@ -10,40 +10,51 @@ let consecutiveBlocks = 0;
 let breakerTripped = false;
 const BREAKER_THRESHOLD = 8;
 
-// 1. Clean Direct Fetch (macOS Runner with Strict URL Routing)
-async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> {
+// 1. Private Google Server Proxy (Bypasses Cloudflare & Geo-blocks)
+// REPLACE THE ASTERISKS WITH YOUR ACTUAL URL:
+const GOOGLE_PROXY = "https://script.google.com/macros/s/AKfycbx5UEZ0Fu_XMFqaGWaVUsL6GyqO1EJCDhURavKWGH-wGVUgwV_JUouBsoiqH4krQYOG/exec";
+
+async function psxJson(path: string, timeoutMs = 20000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
   
-  // CRITICAL: We removed the `_t=` cache buster. 
-  // Cloudflare strictly validates PSX API endpoints and throws 404s on unknown query strings.
-  const url = `https://dps.psx.com.pk${path}`;
-  
+  const sep = path.includes("?") ? "&" : "?";
+  const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
+  const fetchUrl = `${GOOGLE_PROXY}?url=${encodeURIComponent(targetUrl)}`;
+
   try {
-    const r = await fetch(url, { 
+    // CRITICAL FIX: We MUST send a fake Chrome User-Agent to Google. 
+    // If Deno doesn't do this, Google thinks it's a bot and returns a Login Page!
+    const r = await fetch(fetchUrl, { 
       headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://dps.psx.com.pk/",
-        "Connection": "keep-alive"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json"
       },
+      redirect: "follow", // Ensure we follow Google's internal routing
       signal: AbortSignal.timeout(timeoutMs) 
     });
     
-    if (r.ok) {
-      const raw = await r.json();
-      consecutiveBlocks = 0;
-      return Array.isArray(raw) ? raw : (raw?.data ?? []);
-    } else {
-      diagnosticReason = `PSX HTTP Error: ${r.status}`;
+    const text = await r.text();
+    const trimmed = text.trim();
+    
+    // Check if Google returned our JSON cleanly
+    if (r.ok && (trimmed.startsWith("[") || trimmed.startsWith("{"))) {
+      const parsed = JSON.parse(trimmed);
+      const finalArray = Array.isArray(parsed) ? parsed : (parsed?.data ?? null);
+      
+      if (finalArray && Array.isArray(finalArray)) {
+        consecutiveBlocks = 0; 
+        return finalArray;
+      }
     }
+    
+    diagnosticReason = `Google returned HTML (Auth Wall). HTTP: ${r.status}. Snippet: ${trimmed.slice(0, 50)}`;
   } catch (e) {
-    diagnosticReason = `Fetch Failed: ${String(e).slice(0, 100)}`;
+    diagnosticReason = `Google Proxy Failed: ${String(e).slice(0, 100)}`;
   }
   
   if (++consecutiveBlocks >= BREAKER_THRESHOLD) {
     breakerTripped = true;
-    diagnosticReason = `BREAKER TRIPPED: ${diagnosticReason}`;
+    diagnosticReason = `BREAKER TRIPPED. Last Error: ${diagnosticReason}`;
   }
   throw new Error(diagnosticReason);
 }
@@ -144,8 +155,8 @@ async function syncQuotes(): Promise<string> {
   const syms = await trackedSymbols();
   const bars = await latestBars();
   
-  // 2. Slowed down pacing (1.2s) to prevent the new Mac IP from hitting rate limits
-  const quotes = await pmap(syms, 2, (s) => buildQuote(s, bars.get(s)), 1200);
+  // Back to fast luxury pacing since Google's IPs can handle it safely
+  const quotes = await pmap(syms, 2, (s) => buildQuote(s, bars.get(s)), 800);
 
   if (!quotes.length) throw new Error(diagnosticReason);
 
@@ -260,7 +271,6 @@ async function main() {
     await SB.from("sync_log").insert({ job: `psx-sync:${action}`, status: "error", detail: msg });
     console.error(`❌ Error: ${msg}`);
     
-    // Clean exit logic
     if (msg.includes("BREAKER TRIPPED") || msg.includes("No fresh quotes")) {
       console.log("ℹ️ Exiting cleanly to prevent GitHub Actions failure spam.");
       Deno.exit(0); 
