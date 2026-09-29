@@ -8,51 +8,40 @@ const SB = createClient(
 let diagnosticReason = "Unknown error. Could not fetch valid data.";
 let consecutiveBlocks = 0;
 let breakerTripped = false;
-const BREAKER_THRESHOLD = 15;
+const BREAKER_THRESHOLD = 8;
 
-
-// 1. Private Google Server Proxy (Bypasses Cloudflare & Geo-blocks)
-// PASTE YOUR GOOGLE SCRIPT URL HERE:
-const GOOGLE_PROXY = "https://script.google.com/macros/s/AKfycbx5UEZ0Fu_XMFqaGWaVUsL6GyqO1EJCDhURavKWGH-wGVUgwV_JUouBsoiqH4krQYOG/exec";
-
+// 1. Clean Direct Fetch (Bypassing via macOS Runner IP Pool)
 async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
   
   const sep = path.includes("?") ? "&" : "?";
-  const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
+  const url = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
   
-  const fetchUrl = `${GOOGLE_PROXY}?url=${encodeURIComponent(targetUrl)}`;
-
-  let r: Response | null = null;
   try {
-    r = await fetch(fetchUrl, { signal: AbortSignal.timeout(timeoutMs) });
-    const text = await r.text();
+    const r = await fetch(url, { 
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Referer": "https://dps.psx.com.pk/"
+      },
+      signal: AbortSignal.timeout(timeoutMs) 
+    });
     
     if (r.ok) {
-      const trimmed = text.trim();
-      if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
-        const parsed = JSON.parse(trimmed);
-        const finalArray = Array.isArray(parsed) ? parsed : (parsed?.data ?? null);
-        
-        if (finalArray && Array.isArray(finalArray)) {
-          consecutiveBlocks = 0; 
-          return finalArray;
-        }
-      }
-      diagnosticReason = `Google Proxy returned invalid JSON. Body: ${trimmed.slice(0, 60)}...`;
+      const raw = await r.json();
+      consecutiveBlocks = 0;
+      return Array.isArray(raw) ? raw : (raw?.data ?? []);
     } else {
-      // We now log the exact body of the 403 so we know if it's Google Auth or Cloudflare
-      diagnosticReason = `Google Proxy HTTP ${r.status}. Body: ${text.slice(0, 100).replace(/\n/g, ' ')}`;
+      diagnosticReason = `PSX HTTP Error: ${r.status}`;
     }
   } catch (e) {
-    diagnosticReason = `Google Proxy Failed: ${String(e).slice(0, 100)}`;
+    diagnosticReason = `Fetch Failed: ${String(e).slice(0, 100)}`;
   }
   
   if (++consecutiveBlocks >= BREAKER_THRESHOLD) {
     breakerTripped = true;
-    diagnosticReason = `BREAKER TRIPPED. Last Error: ${diagnosticReason}`;
+    diagnosticReason = `BREAKER TRIPPED: ${diagnosticReason}`;
   }
-  
   throw new Error(diagnosticReason);
 }
 
@@ -152,8 +141,8 @@ async function syncQuotes(): Promise<string> {
   const syms = await trackedSymbols();
   const bars = await latestBars();
   
-  // Luxury Pacing
-  const quotes = await pmap(syms, 2, (s) => buildQuote(s, bars.get(s)), 800);
+  // 2. Slowed down pacing (1.2s) to prevent the new Mac IP from hitting rate limits
+  const quotes = await pmap(syms, 2, (s) => buildQuote(s, bars.get(s)), 1200);
 
   if (!quotes.length) throw new Error(diagnosticReason);
 
