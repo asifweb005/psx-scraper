@@ -10,6 +10,7 @@ let consecutiveBlocks = 0;
 let breakerTripped = false;
 const BREAKER_THRESHOLD = 15;
 
+
 // 1. Private Google Server Proxy (Bypasses Cloudflare & Geo-blocks)
 // PASTE YOUR GOOGLE SCRIPT URL HERE:
 const GOOGLE_PROXY = "https://script.google.com/macros/s/AKfycbx5UEZ0Fu_XMFqaGWaVUsL6GyqO1EJCDhURavKWGH-wGVUgwV_JUouBsoiqH4krQYOG/exec";
