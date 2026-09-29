@@ -8,37 +8,37 @@ const SB = createClient(
 let diagnosticReason = "Unknown error. Could not fetch valid data.";
 let consecutiveBlocks = 0;
 let breakerTripped = false;
-const BREAKER_THRESHOLD = 5;
+const BREAKER_THRESHOLD = 8;
 
-// Direct Fetch (Executes cleanly on your Residential IP)
-async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> {
+// 1. Cloudflare Internal Proxy (Bypasses the WAF natively)
+// PASTE YOUR CLOUDFLARE WORKER URL HERE:
+const CF_PROXY = "https://psx-proxy.YOUR_USERNAME.workers.dev";
+
+async function psxJson(path: string, timeoutMs = 20000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
   
   const sep = path.includes("?") ? "&" : "?";
   const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
+  const fetchUrl = `${CF_PROXY}?target=${encodeURIComponent(targetUrl)}`;
 
   try {
-    const r = await fetch(targetUrl, { 
-      headers: { 
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": "https://dps.psx.com.pk/"
-      },
-      signal: AbortSignal.timeout(timeoutMs) 
-    });
+    const r = await fetch(fetchUrl, { signal: AbortSignal.timeout(timeoutMs) });
+    const text = await r.text();
+    const trimmed = text.trim();
     
-    if (r.ok) {
-      const parsed = await r.json();
+    if (r.ok && (trimmed.startsWith("[") || trimmed.startsWith("{"))) {
+      const parsed = JSON.parse(trimmed);
       const finalArray = Array.isArray(parsed) ? parsed : (parsed?.data ?? null);
+      
       if (finalArray && Array.isArray(finalArray)) {
         consecutiveBlocks = 0; 
         return finalArray;
       }
     }
-    diagnosticReason = `PSX HTTP Error: ${r.status}`;
+    
+    diagnosticReason = `Proxy HTML. HTTP: ${r.status}. Snippet: ${trimmed.slice(0, 50).replace(/\n/g, ' ')}`;
   } catch (e) {
-    diagnosticReason = `Fetch Failed: ${String(e).slice(0, 100)}`;
+    diagnosticReason = `Proxy Fetch Failed: ${String(e).slice(0, 100)}`;
   }
   
   if (++consecutiveBlocks >= BREAKER_THRESHOLD) {
@@ -144,7 +144,7 @@ async function syncQuotes(): Promise<string> {
   const syms = await trackedSymbols();
   const bars = await latestBars();
   
-  const quotes = await pmap(syms, 4, (s) => buildQuote(s, bars.get(s)), 500);
+  const quotes = await pmap(syms, 4, (s) => buildQuote(s, bars.get(s)), 800);
 
   if (!quotes.length) throw new Error(diagnosticReason);
 
