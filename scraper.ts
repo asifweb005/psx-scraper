@@ -10,57 +10,69 @@ let consecutiveBlocks = 0;
 let breakerTripped = false;
 const BREAKER_THRESHOLD = 15;
 
-// 1. Bulletproof Proxy Routing with Strict JSON Validation
-async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> { 
+// 1. Bulletproof Proxy Routing with Strict Validation & Diagnostics
+async function psxJson(path: string, timeoutMs = 12000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
-  
+
   const sep = path.includes("?") ? "&" : "?";
-  const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
-  
-  // A wide net of public CORS proxies to spread the load and bypass IP bans
+  // Rapid cache-busting to ensure we don't hit a cached Cloudflare 403 page
+  const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 10000)}`;
+
   const routes = [
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
-    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`,
-    `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
-    `https://thingproxy.freeboard.io/fetch/${targetUrl}`,
-    targetUrl // Direct fallback
+    { name: "AllOrigins", url: `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`, wrap: true },
+    { name: "CodeTabs", url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`, wrap: false },
+    { name: "CorsProxy", url: `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`, wrap: false },
+    { name: "Direct", url: targetUrl, wrap: false }
   ];
 
-  let lastError = "";
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+  };
+
+  const errors: string[] = [];
 
   for (const route of routes) {
     try {
-      const r = await fetch(route, { 
-        headers: { "Accept": "application/json" },
-        signal: AbortSignal.timeout(timeoutMs) 
-      });
-      
+      const r = await fetch(route.url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+      const text = await r.text();
+
       if (r.ok) {
-        const resText = await r.text();
-        
-        // CRITICAL: Cloudflare often returns HTTP 200 with an HTML captcha page. 
-        // We must strictly verify it's a JSON array or object before accepting it.
-        const trimmed = resText.trim();
-        if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
-          const resJson = JSON.parse(trimmed);
+        let parsed = null;
+        try {
+          parsed = JSON.parse(text);
+          // Unpack AllOrigins wrapper safely
+          if (route.wrap && parsed && parsed.contents) {
+            if (parsed.status?.http_code !== 200) {
+              errors.push(`${route.name} hit PSX HTTP ${parsed.status?.http_code}`);
+              continue;
+            }
+            parsed = JSON.parse(parsed.contents);
+          }
+        } catch (e) {
+          errors.push(`${route.name} ParseError (Cloudflare Captcha?)`);
+          continue;
+        }
+
+        const finalArray = Array.isArray(parsed) ? parsed : (parsed?.data ?? null);
+        if (finalArray && Array.isArray(finalArray)) {
           consecutiveBlocks = 0; // Reset breaker on success
-          return Array.isArray(resJson) ? resJson : (resJson?.data ?? []);
+          return finalArray;
         } else {
-          lastError = "Proxy returned HTML/Captcha instead of JSON";
-          continue; // Move to the next proxy
+           errors.push(`${route.name} Invalid JSON`);
         }
       } else {
-        lastError = `HTTP ${r.status}`;
+        errors.push(`${route.name} HTTP ${r.status}`);
       }
     } catch (e) {
-      lastError = String(e).slice(0, 100);
+      errors.push(`${route.name} ${String(e).replace('Error: ', '').slice(0, 30)}`);
     }
   }
-  
-  diagnosticReason = `All proxies blocked/timed out. Last error: ${lastError}`;
+
+  diagnosticReason = `All routes failed. Details: ${errors.join(" | ")}`;
   if (++consecutiveBlocks >= BREAKER_THRESHOLD) {
     breakerTripped = true;
-    diagnosticReason = `PSX blocked ${BREAKER_THRESHOLD} times -- aborting.`;
+    diagnosticReason = `BREAKER TRIPPED. Last: ${errors.join(" | ")}`;
   }
   throw new Error(diagnosticReason);
 }
@@ -177,11 +189,10 @@ async function syncQuotes(): Promise<string> {
     );
   }
 
-const rows = fresh.map((q) => ({ symbol: q.symbol, last_price: q.last, change: q.change, change_pct: q.change_pct, open: q.open, high: q.high, low: q.low, volume: q.volume, ldcp: q.ldcp, refreshed_at: new Date().toISOString() }));
+  const rows = fresh.map((q) => ({ symbol: q.symbol, last_price: q.last, change: q.change, change_pct: q.change_pct, open: q.open, high: q.high, low: q.low, volume: q.volume, ldcp: q.ldcp, refreshed_at: new Date().toISOString() }));
   const { error } = await SB.from("market_quotes").upsert(rows);
   if (error) throw error;
 
-  // Replace the old return line with this exact line:
   return `upserted ${rows.length}/${syms.length} fresh quotes ${holding > 0 ? "(" + holding + " held)" : ""}`;
 }
 
@@ -279,7 +290,7 @@ async function main() {
     console.error(`❌ Error: ${msg}`);
     
     // Clean exit logic
-    if (msg.includes("FEED BLOCKED") || msg.includes("No fresh quotes")) {
+    if (msg.includes("BREAKER TRIPPED") || msg.includes("No fresh quotes")) {
       console.log("ℹ️ Exiting cleanly to prevent GitHub Actions failure spam.");
       Deno.exit(0); 
     } else {
