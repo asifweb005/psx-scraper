@@ -10,19 +10,22 @@ let consecutiveBlocks = 0;
 let breakerTripped = false;
 const BREAKER_THRESHOLD = 8;
 
-// 1. Clean Direct Fetch (Bypassing via macOS Runner IP Pool)
+// 1. Clean Direct Fetch (macOS Runner with Strict URL Routing)
 async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
   
-  const sep = path.includes("?") ? "&" : "?";
-  const url = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
+  // CRITICAL: We removed the `_t=` cache buster. 
+  // Cloudflare strictly validates PSX API endpoints and throws 404s on unknown query strings.
+  const url = `https://dps.psx.com.pk${path}`;
   
   try {
     const r = await fetch(url, { 
       headers: {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "Referer": "https://dps.psx.com.pk/"
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://dps.psx.com.pk/",
+        "Connection": "keep-alive"
       },
       signal: AbortSignal.timeout(timeoutMs) 
     });
