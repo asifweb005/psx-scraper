@@ -22,14 +22,11 @@ async function psxJson(path: string, timeoutMs = 20000): Promise<unknown[]> {
   const fetchUrl = `${GOOGLE_PROXY}?url=${encodeURIComponent(targetUrl)}`;
 
   try {
-    // CRITICAL FIX: We MUST send a fake Chrome User-Agent to Google. 
-    // If Deno doesn't do this, Google thinks it's a bot and returns a Login Page!
+    // CRITICAL FIX: Strip all fake headers. 
+    // Sending a Chrome User-Agent from a GitHub IP triggers Google's suspicious activity filter.
+    // A naked fetch is correctly recognized by Google as a standard API call.
     const r = await fetch(fetchUrl, { 
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json"
-      },
-      redirect: "follow", // Ensure we follow Google's internal routing
+      redirect: "follow", 
       signal: AbortSignal.timeout(timeoutMs) 
     });
     
@@ -47,7 +44,7 @@ async function psxJson(path: string, timeoutMs = 20000): Promise<unknown[]> {
       }
     }
     
-    diagnosticReason = `Google returned HTML (Auth Wall). HTTP: ${r.status}. Snippet: ${trimmed.slice(0, 50)}`;
+    diagnosticReason = `Google returned HTML. HTTP: ${r.status}. Snippet: ${trimmed.slice(0, 50).replace(/\n/g, ' ')}`;
   } catch (e) {
     diagnosticReason = `Google Proxy Failed: ${String(e).slice(0, 100)}`;
   }
