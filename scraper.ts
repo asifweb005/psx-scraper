@@ -10,42 +10,54 @@ let consecutiveBlocks = 0;
 let breakerTripped = false;
 const BREAKER_THRESHOLD = 8;
 
-// 1. Clean Direct Fetch (macOS Runner with strict AJAX Headers)
-async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> {
+// 1. Private Google POST Proxy (Bypasses Google HTML Security Walls & PSX Cloudflare)
+// REPLACE THE ASTERISKS WITH YOUR ACTUAL GOOGLE WEB APP URL:
+const GOOGLE_PROXY = "https://script.google.com/macros/s/AKfycbyoeMgLqK49DzHTMmdb7KNo-bwCaGOZdEYV8MEvHISixmYv36faxSPLHIjT3x6ITkfn/exec";
+
+async function psxJson(path: string, timeoutMs = 20000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
   
   const sep = path.includes("?") ? "&" : "?";
-  // Keep the cache-buster so Cloudflare doesn't serve stale data
-  const url = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
-  
+  const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
+
   try {
-    const r = await fetch(url, { 
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://dps.psx.com.pk/",
-        // CRITICAL FIX: Without this, the PSX Laravel backend throws a 404!
-        "X-Requested-With": "XMLHttpRequest", 
-        "Connection": "keep-alive"
-      },
+    // Send a POST request with a JSON body to completely bypass Google's Open Redirect scanners
+    const r = await fetch(GOOGLE_PROXY, { 
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: targetUrl }),
+      redirect: "follow", 
       signal: AbortSignal.timeout(timeoutMs) 
     });
     
-    if (r.ok) {
-      const raw = await r.json();
-      consecutiveBlocks = 0;
-      return Array.isArray(raw) ? raw : (raw?.data ?? []);
+    const text = await r.text();
+    const trimmed = text.trim();
+    
+    if (r.ok && (trimmed.startsWith("[") || trimmed.startsWith("{"))) {
+      const parsed = JSON.parse(trimmed);
+      
+      // Handle the case where Google's catch block returns a JSON error
+      if (parsed.error) {
+        diagnosticReason = `Google Apps Script Error: ${parsed.error}`;
+      } else {
+        const finalArray = Array.isArray(parsed) ? parsed : (parsed?.data ?? null);
+        if (finalArray && Array.isArray(finalArray)) {
+          consecutiveBlocks = 0; 
+          return finalArray;
+        } else {
+          diagnosticReason = "PSX returned JSON, but the data array was missing.";
+        }
+      }
     } else {
-      diagnosticReason = `PSX HTTP Error: ${r.status}`;
+      diagnosticReason = `Proxy returned unexpected format. HTTP: ${r.status}. Snippet: ${trimmed.slice(0, 80).replace(/\n/g, ' ')}`;
     }
   } catch (e) {
-    diagnosticReason = `Fetch Failed: ${String(e).slice(0, 100)}`;
+    diagnosticReason = `Proxy Fetch Failed: ${String(e).slice(0, 100)}`;
   }
   
   if (++consecutiveBlocks >= BREAKER_THRESHOLD) {
     breakerTripped = true;
-    diagnosticReason = `BREAKER TRIPPED: ${diagnosticReason}`;
+    diagnosticReason = `BREAKER TRIPPED. Last Error: ${diagnosticReason}`;
   }
   throw new Error(diagnosticReason);
 }
@@ -146,8 +158,8 @@ async function syncQuotes(): Promise<string> {
   const syms = await trackedSymbols();
   const bars = await latestBars();
   
-  // Slower pacing so the Mac IP doesn't trip rate limiters
-  const quotes = await pmap(syms, 2, (s) => buildQuote(s, bars.get(s)), 1200);
+  // Safe pacing
+  const quotes = await pmap(syms, 2, (s) => buildQuote(s, bars.get(s)), 800);
 
   if (!quotes.length) throw new Error(diagnosticReason);
 
