@@ -1,8 +1,6 @@
 name: PSX Live Quotes Sync
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -15,7 +13,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22' # Upgraded to Node 22 for native WebSocket support
+          node-version: '22'
 
       - name: Install dependencies
         run: npm install
