@@ -17,34 +17,31 @@ const GOOGLE_PROXY = "https://script.google.com/macros/s/AKfycbxrLBJreQnheCy4KUD
 async function psxJson(path: string, timeoutMs = 15000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
   
-  // Only add cache buster if we are hitting PSX directly. Google handles caching differently.
   const sep = path.includes("?") ? "&" : "?";
   const targetUrl = `https://dps.psx.com.pk${path}${sep}_t=${Math.floor(Date.now() / 60000)}`;
   
-  // Route the request through your private Google Apps Script
   const fetchUrl = `${GOOGLE_PROXY}?url=${encodeURIComponent(targetUrl)}`;
 
   let r: Response | null = null;
   try {
     r = await fetch(fetchUrl, { signal: AbortSignal.timeout(timeoutMs) });
+    const text = await r.text();
     
     if (r.ok) {
-      const text = await r.text();
       const trimmed = text.trim();
-      
-      // Verify Google returned JSON and not an error page
       if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
         const parsed = JSON.parse(trimmed);
         const finalArray = Array.isArray(parsed) ? parsed : (parsed?.data ?? null);
         
         if (finalArray && Array.isArray(finalArray)) {
-          consecutiveBlocks = 0; // Reset breaker
+          consecutiveBlocks = 0; 
           return finalArray;
         }
       }
-      diagnosticReason = "Google Proxy returned invalid JSON payload.";
+      diagnosticReason = `Google Proxy returned invalid JSON. Body: ${trimmed.slice(0, 60)}...`;
     } else {
-      diagnosticReason = `Google Proxy HTTP Error: ${r.status}`;
+      // We now log the exact body of the 403 so we know if it's Google Auth or Cloudflare
+      diagnosticReason = `Google Proxy HTTP ${r.status}. Body: ${text.slice(0, 100).replace(/\n/g, ' ')}`;
     }
   } catch (e) {
     diagnosticReason = `Google Proxy Failed: ${String(e).slice(0, 100)}`;
