@@ -12,7 +12,7 @@ const BREAKER_THRESHOLD = 8;
 
 // 1. Cloudflare Internal Proxy (Bypasses the WAF natively)
 // PASTE YOUR CLOUDFLARE WORKER URL HERE:
-const CF_PROXY = "https://psx-proxy.YOUR_USERNAME.workers.dev";
+const CF_PROXY = "https://psx-proxy.am61819167.workers.dev";
 
 async function psxJson(path: string, timeoutMs = 20000): Promise<unknown[]> {
   if (breakerTripped) throw new Error(diagnosticReason);
