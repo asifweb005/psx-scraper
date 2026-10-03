@@ -85,6 +85,7 @@ export function rsi14(closes: number[]): number | null {
     ag = (ag * 13 + Math.max(d, 0)) / 14;
     al = (al * 13 + Math.max(-d, 0)) / 14;
   }
+  if (ag === 0 && al === 0) return 50;
   if (al === 0) return 100;
   return 100 - 100 / (1 + ag / al);
 }
@@ -152,6 +153,7 @@ export function computeIndicators(
   indexClose: IndexCloseLookup | null = null,
 ): IndicatorRow | null {
   if (bars.length < 20) return null;
+  if (bars.some((b,i) => !Number.isFinite(b.close) || b.close <= 0 || !Number.isFinite(b.volume) || b.volume < 0 || (i > 0 && b.traded_on <= bars[i-1].traded_on))) throw new Error("Invalid or unordered indicator bars");
 
   const closes = bars.map((b) => b.close);
   const last = closes[closes.length - 1];
@@ -180,9 +182,9 @@ export function computeIndicators(
   // ---- score: identical to backtest-signals scoreAt() ----
   let score = 0;
   if (rsi !== null) score += rsi < 30 ? 25 : rsi > 70 ? -25 : (50 - rsi) * 0.5;
-  if (s50 !== null) score += last > s50 ? 15 : -15;
-  if (s200 !== null) score += last > s200 ? 15 : -15;
-  score += macd > macdSig ? 20 : -20;
+  if (s50 !== null) score += last > s50 ? 15 : last < s50 ? -15 : 0;
+  if (s200 !== null) score += last > s200 ? 15 : last < s200 ? -15 : 0;
+  score += macd > macdSig ? 20 : macd < macdSig ? -20 : 0;
   if (bbL !== null && last < bbL) score += 10;
   if (bbU !== null && last > bbU) score -= 10;
   score = Math.max(-100, Math.min(100, Math.round(score * 100) / 100));
@@ -201,7 +203,8 @@ export function computeIndicators(
 
   // ---- extras ----
   const obv = obvSeries(bars);
-  const { support, resistance } = supportResistance(bars);
+  const validRanges = bars.every(b => b.low > 0 && b.high >= Math.max(b.open,b.close) && b.low <= Math.min(b.open,b.close));
+  const { support, resistance } = validRanges ? supportResistance(bars) : { support: null, resistance: null };
 
   // Relative strength vs KSE-100 over 21 sessions (percentage points).
   let rel: number | null = null;
@@ -235,9 +238,9 @@ export function computeIndicators(
     macd_line: round(macd), macd_signal: round(macdSig),
     macd_histogram: round(macd - macdSig),
     bb_upper: orNull(bbU), bb_middle: orNull(s20), bb_lower: orNull(bbL),
-    atr_14: orNull(atr14(bars)),
+    atr_14: validRanges ? orNull(atr14(bars)) : null,
     obv: Math.round(obv[obv.length - 1]),
-    vwap: orNull(vwap20(bars)),
+    vwap: validRanges ? orNull(vwap20(bars)) : null,
     support: orNull(support), resistance: orNull(resistance),
     signal, signal_score: score,
     rel_strength_1m: orNull(rel, 2),

@@ -44,6 +44,7 @@ function rrsi14(closes: number[]): number | null {
     ag = (ag * 13 + Math.max(d, 0)) / 14;
     al = (al * 13 + Math.max(-d, 0)) / 14;
   }
+  if (ag === 0 && al === 0) return 50;
   if (al === 0) return 100;
   return 100 - 100 / (1 + ag / al);
 }
@@ -70,9 +71,9 @@ function refScoreAt(bars: Bar[], cutoff: number): { score: number; signal: strin
   const avgVolume = vsum / 20;
   let score = 0;
   if (rsi !== null) score += rsi < 30 ? 25 : rsi > 70 ? -25 : (50 - rsi) * 0.5;
-  if (s50 !== null) score += last > s50 ? 15 : -15;
-  if (s200 !== null) score += last > s200 ? 15 : -15;
-  score += macd > macdSig ? 20 : -20;
+  if (s50 !== null) score += last > s50 ? 15 : last < s50 ? -15 : 0;
+  if (s200 !== null) score += last > s200 ? 15 : last < s200 ? -15 : 0;
+  score += macd > macdSig ? 20 : macd < macdSig ? -20 : 0;
   if (bbL !== null && last < bbL) score += 10;
   if (bbU !== null && last > bbU) score -= 10;
   score = Math.max(-100, Math.min(100, round2(score)));
@@ -163,7 +164,7 @@ Deno.test("sanity: ranges and ordering of derived columns", () => {
 
 Deno.test("RSI is 100 on a monotone rise", () => {
   const bars: Bar[] = Array.from({ length: 40 }, (_, i) => ({
-    traded_on: `2025-02-${String((i % 28) + 1).padStart(2, "0")}`,
+    traded_on: new Date(Date.UTC(2025,1,i+1)).toISOString().slice(0,10),
     open: 100 + i, high: 101 + i, low: 99 + i, close: 100 + i, volume: 500000,
   }));
   assert(computeIndicators(bars)!.rsi_14 === 100, "RSI = 100");
@@ -190,7 +191,7 @@ Deno.test("OBV divergence: price up + volume only on down days => bearish", () =
     const up = late ? i % 3 !== 0 : true;
     const nextPx = up ? px * (late ? 1.012 : 1.002) : px * 0.985;
     bars.push({
-      traded_on: `2025-03-${String((i % 28) + 1).padStart(2, "0")}-${i}`,
+      traded_on: new Date(Date.UTC(2025,2,i+1)).toISOString().slice(0,10),
       open: px, high: Math.max(px, nextPx) * 1.005, low: Math.min(px, nextPx) * 0.995,
       close: nextPx, volume: late ? (up ? 20000 : 900000) : 300000,
     });
