@@ -56,14 +56,14 @@ async function activeSymbols(): Promise<string[]> {
 async function loadBars(symbol: string): Promise<Bar[]> {
   // Newest N bars (descending), then reverse -> oldest first.
   const { data, error } = await SB.from("historical_prices")
-    .select("traded_on, open, high, low, close, volume")
+    .select("traded_on, open, high, low, close, volume, range_quality")
     .eq("symbol", symbol)
     .order("traded_on", { ascending: false })
     .limit(BARS_PER_SYMBOL);
   if (error) throw error;
   return (data ?? []).reverse().map((r: Record<string, unknown>) => ({
     traded_on: String(r.traded_on),
-    open: num(r.open), high: num(r.high), low: num(r.low),
+    open: num(r.open), high: r.range_quality === "verified_ohlc" ? num(r.high) : 0, low: r.range_quality === "verified_ohlc" ? num(r.low) : 0,
     close: num(r.close), volume: num(r.volume),
   }));
 }
@@ -89,7 +89,7 @@ async function loadIndexLookup(): Promise<IndexCloseLookup | null> {
         const mid = (lo + hi) >> 1;
         if (rows[mid].d <= date) { ans = mid; lo = mid + 1; } else hi = mid - 1;
       }
-      return ans >= 0 ? rows[ans].c : null;
+      return ans >= 0 && (Date.parse(date)-Date.parse(rows[ans].d)) <= 4*86400000 ? rows[ans].c : null;
     };
   } catch (e) {
     console.warn(`[warn] index history unavailable: ${String(e).slice(0, 120)}`);
@@ -200,7 +200,7 @@ async function run(backfill: number, dry: boolean): Promise<string> {
 
   const newest = dates[dates.length - 1];
   const ageDays = (Date.now() - new Date(newest).getTime()) / 86400000;
-  if (ageDays > 6) console.warn(`[warn] newest bar is ${newest} (${ageDays.toFixed(0)}d old) -- did the EOD sync run?`);
+  if (ageDays > 4) throw new Error(`Newest bar is stale: ${newest}; ingestion must catch up first`);
   if (dropped.size) console.warn(`[warn] not in table, skipped: ${[...dropped].join(", ")}`);
   const stored = new Set(Object.keys(rows[0]));
   const uncomputed = [...cols].filter((c) =>
@@ -214,22 +214,9 @@ async function run(backfill: number, dry: boolean): Promise<string> {
 
   if (dry) { console.log(`[dry-run] ${detail}`); console.log(rows[0]); return `dry-run ${detail}`; }
 
-  // delete-then-insert per date (no assumption about a unique constraint)
-  const byDate = new Map<string, Record<string, unknown>[]>();
-  for (const r of rows) {
-    const d = r.computed_on as string;
-    byDate.set(d, [...(byDate.get(d) ?? []), r]);
-  }
-  for (const [date, rs] of byDate) {
-    for (let i = 0; i < rs.length; i += 100) {
-      const chunk = rs.slice(i, i + 100);
-      const del = await SB.from("technical_indicators").delete()
-        .eq("computed_on", date).eq("timeframe", timeframe)
-        .in("symbol", chunk.map((r) => r.symbol as string));
-      if (del.error) throw del.error;
-      const ins = await SB.from("technical_indicators").insert(chunk);
-      if (ins.error) throw ins.error;
-    }
+  for (let i = 0; i < rows.length; i += 100) {
+    const { error } = await SB.from("technical_indicators").upsert(rows.slice(i,i+100), { onConflict: "symbol,computed_on,timeframe" });
+    if (error) throw error;
   }
   return detail;
 }
