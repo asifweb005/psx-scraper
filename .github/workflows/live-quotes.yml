@@ -2,10 +2,20 @@ name: PSX Live Quotes Sync
 
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Validate source responses without writing to Supabase'
+        type: boolean
+        default: false
+
+concurrency:
+  group: psx-live-quotes
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,10 +26,17 @@ jobs:
           node-version: '22'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Validate ingestion behavior
+        run: node --test quote_validation.test.js scraper.test.js
 
       - name: Run scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: node scraper.js quotes
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=()
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          node scraper.js quotes "${args[@]}"
