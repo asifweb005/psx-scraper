@@ -14,3 +14,7 @@ jobs:
         with:
           node-version: '22'
       - run: node --test quote_validation.test.js scraper.test.js history_validation.test.js
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest test_export_history.py

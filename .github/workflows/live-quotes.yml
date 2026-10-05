@@ -48,6 +48,16 @@ jobs:
       - name: Validate ingestion behavior
         run: node --test quote_validation.test.js scraper.test.js history_validation.test.js
 
+      - name: Setup Python for daily history
+        if: ${{ inputs.mode == 'history' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install historical toolkit
+        if: ${{ inputs.mode == 'history' }}
+        run: python -m pip install -r requirements-history.txt
+
       - name: Run scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

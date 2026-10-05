@@ -18,9 +18,11 @@ Corporate-events requests now fail on non-2xx HTTP responses and retain stored e
 
 ## Manual historical backfill
 
-`PSX Live Quotes Sync` now has `mode=history` with start/end dates and an optional ticker list. It opens the official `/historical` page with Puppeteer and uses PSX's own AJAX client to request each symbol/month. It validates table headers, source dates, OHLC ranges and volumes, and inserts only missing `(symbol,traded_on)` rows. Existing candles are preserved. A successful writing run then recomputes indicators. The normal five-minute cron continues to use the default `quotes` mode.
+`PSX Live Quotes Sync` has `mode=history` with start/end dates and an optional ticker list. Historical gap repair uses **pypsx-toolkit 3.1.2**, Python 3.12 and `get_historical()`. The toolkit is the source adapter; PSX is its documented upstream source. Python explicitly filters whole-month responses to the requested date range and hands genuine OHLCV rows to the Node validator. Only missing `(symbol,traded_on)` rows are inserted; existing candles are preserved. Writes are reread to verify session coverage against the holiday calendar. A successful writing run then recomputes indicators. The normal five-minute cron continues to use `quotes` mode with Node/Puppeteer.
 
-First run `mode=history`, `history_from=2026-09-25`, `history_to=2026-10-02`, `history_symbols=HBL`, `dry_run=true`. Inspect the runner response and validated bar count before a writing run for all symbols. Dry run does not write bars/logs or recompute indicators. Non-2xx sources, malformed rows and incomplete coverage fail visibly. This browser history path is implemented and tested with fixtures; the official site's history button still returned HTTP 404 on the local probe.
+First run `mode=history`, `history_from=2026-09-25`, `history_to=2026-10-02`, `history_symbols=HBL`, `dry_run=true`. Inspect validated bar counts before a writing run for all symbols. Dry run does not write bars/logs or recompute indicators. Source errors, malformed rows and incomplete coverage fail visibly. Free toolkit requests returned all six requested sessions for HBL, OGDC and LUCK locally. The integrated Python-to-Node HBL request returned six validated bars with zero rejected rows. Full 82-symbol restoration is still unverified and no production backfill has been run.
+
+Source map: historical gap backfill = pypsx-toolkit; current quotes and today's EOD/company snapshot = existing Node/Puppeteer scraper; storage = Supabase historical_prices; calculations = indicators.ts. The toolkit is free to use but has a proprietary package license; it is not the PSX exchange itself.
 
 ### Tests
 
