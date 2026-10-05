@@ -2,10 +2,37 @@ name: PSX Live Quotes Sync
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Live quotes or missing daily history'
+        type: choice
+        options: [quotes, history]
+        default: quotes
+      history_from:
+        description: 'History start date (YYYY-MM-DD)'
+        type: string
+        default: '2026-09-25'
+      history_to:
+        description: 'History end date (YYYY-MM-DD, before today)'
+        type: string
+        default: '2026-10-02'
+      history_symbols:
+        description: 'Optional comma-separated tickers; blank means all active stocks'
+        type: string
+        default: ''
+      dry_run:
+        description: 'Validate source responses without writing to Supabase'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ inputs.mode == 'history' && 'psx-history-backfill' || 'psx-live-quotes' }}
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,10 +43,52 @@ jobs:
           node-version: '22'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Validate ingestion behavior
+        run: node --test quote_validation.test.js scraper.test.js history_validation.test.js
+
+      - name: Setup Python for daily history
+        if: ${{ inputs.mode == 'history' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install historical toolkit
+        if: ${{ inputs.mode == 'history' }}
+        run: python -m pip install -r requirements-history.txt
 
       - name: Run scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: node scraper.js quotes
+          DRY_RUN: ${{ inputs.dry_run }}
+          MODE: ${{ inputs.mode || 'quotes' }}
+          HISTORY_FROM: ${{ inputs.history_from }}
+          HISTORY_TO: ${{ inputs.history_to }}
+          HISTORY_SYMBOLS: ${{ inputs.history_symbols }}
+        run: |
+          args=()
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ "$MODE" = "history" ]; then
+            node historical_backfill.js "${args[@]}"
+          else
+            node scraper.js quotes "${args[@]}"
+          fi
+
+      - name: Setup Deno for restored daily indicators
+        if: ${{ inputs.mode == 'history' && !inputs.dry_run }}
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+
+      - name: Recompute indicators after successful backfill
+        if: ${{ inputs.mode == 'history' && !inputs.dry_run }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          HISTORY_FROM: ${{ inputs.history_from }}
+          HISTORY_TO: ${{ inputs.history_to }}
+        run: |
+          count=$(node -e 'console.log(Math.ceil((Date.parse(process.env.HISTORY_TO)-Date.parse(process.env.HISTORY_FROM))/86400000)+1)')
+          deno run --allow-net --allow-env indicators.ts --backfill "$count"

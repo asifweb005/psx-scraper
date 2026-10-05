@@ -42,6 +42,7 @@ async function main() {
         signal: AbortSignal.timeout(25000),
       });
       const html = await r.text();
+      if (!r.ok) throw new Error(`payouts source HTTP ${r.status}; stored events preserved`);
       const rows = extractRows(html);
       const upsertRows: Record<string, unknown>[] = [];
 
@@ -109,6 +110,7 @@ async function main() {
         signal: AbortSignal.timeout(25000),
       });
       const html = await r.text();
+      if (!r.ok) throw new Error(`announcements source HTTP ${r.status}; stored events preserved`);
       const rows = extractRows(html);
       const upsertRows: Record<string, unknown>[] = [];
 
