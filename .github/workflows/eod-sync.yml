@@ -5,11 +5,6 @@ on:
     # Runs once daily at 5:45 PM PKT (12:45 UTC, Mon-Fri)
     - cron: '45 12 * * 1-5'
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Validate official OHLCV responses without writing'
-        type: boolean
-        default: false
 
 concurrency:
   group: psx-eod-sync
@@ -38,8 +33,4 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          args=()
-          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
-          node scraper.js eod "${args[@]}"
+        run: node scraper.js eod
