@@ -125,6 +125,12 @@ const freshQuotes = await pmap(syms, 1, async sym => {
       const { error: upsertErr } = await SB.from("market_quotes").upsert(rows);
       if (upsertErr) throw upsertErr;
       console.log(`✅ Success: Upserted ${rows.length} fresh quotes.`);
+      // Sample validated quotes at the source time, not the workflow run time.
+      // Snapshot volume is cumulative, so it cannot represent interval volume.
+      const points = rows.map(q => ({symbol:q.symbol, ts:q.refreshed_at, price:q.last, volume:null}));
+      const { error: intradayErr } = await SB.from("intraday_prices").upsert(points, {onConflict:"symbol,ts", ignoreDuplicates:true});
+      if (intradayErr) throw intradayErr;
+      console.log(`✅ Stored ${points.length} intraday quote samples (source timestamps; duplicates ignored).`);
     }
 
     if(!freshQuotes.length)throw Error("No validated current quotes; stored quotes preserved");
@@ -168,3 +174,5 @@ const freshQuotes = await pmap(syms, 1, async sym => {
 }
 
 main().catch(e=>{console.error(String(e));process.exitCode=1;});
+
+
