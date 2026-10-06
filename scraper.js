@@ -100,13 +100,14 @@ async function main() {
       for (let i = 0; i < items.length; i += size) {
         const chunk = await Promise.all(items.slice(i, i + size).map(x => fn(x)));
         for (const c of chunk) if (c) out.push(c);
+        await new Promise(r=>setTimeout(r,1500));
       }
       return out;
     }
 
     console.log(`Scraping ${syms.length} symbols in high-speed parallel batches...`);
 
-const freshQuotes = await pmap(syms, 10, async sym => {
+const freshQuotes = await pmap(syms, 1, async sym => {
       try {
         // Prefer official REG snapshot: actual session high/low, cumulative
         // volume, LDCP and source timestamp, including Friday session hours.
@@ -167,4 +168,3 @@ const freshQuotes = await pmap(syms, 10, async sym => {
 }
 
 main().catch(e=>{console.error(String(e));process.exitCode=1;});
-
