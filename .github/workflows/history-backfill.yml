@@ -1,0 +1,77 @@
+name: PSX Historical Backfill
+on:
+  workflow_dispatch:
+    inputs:
+      history_from:
+        description: 'First missing session (YYYY-MM-DD)'
+        type: string
+        required: true
+      history_to:
+        description: 'Last missing session (YYYY-MM-DD, before today)'
+        type: string
+        required: true
+      history_symbols:
+        description: 'Comma-separated symbols; blank selects all active stocks'
+        type: string
+        default: ''
+      dry_run:
+        description: 'Validate without writing prices, logs or indicators'
+        type: boolean
+        default: true
+  pull_request:
+    paths: ['history/**', '.github/workflows/history-backfill.yml']
+permissions:
+  contents: read
+concurrency:
+  group: psx-history-backfill
+  cancel-in-progress: false
+jobs:
+  history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test history validation
+        working-directory: history
+        run: |
+          node --test history_validation.test.js
+          python -m unittest test_export_history.py
+      - name: Install history dependencies
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        working-directory: history
+        run: |
+          npm ci --ignore-scripts
+          python -m pip install -r requirements-history.txt
+      - name: Restore missing daily history
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        working-directory: history
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          HISTORY_FROM: ${{ inputs.history_from }}
+          HISTORY_TO: ${{ inputs.history_to }}
+          HISTORY_SYMBOLS: ${{ inputs.history_symbols }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=()
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          node historical_backfill.js "${args[@]}"
+      - uses: denoland/setup-deno@v1
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
+        with:
+          deno-version: v1.x
+      - name: Recompute indicators after successful backfill
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          HISTORY_FROM: ${{ inputs.history_from }}
+        run: |
+          count=$(node -e 'console.log(Math.ceil((Date.now()-Date.parse(process.env.HISTORY_FROM))/86400000)+1)')
+          deno run --allow-net --allow-env indicators.ts --backfill "$count"
