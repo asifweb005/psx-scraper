@@ -1,6 +1,7 @@
 const puppeteer = require('puppeteer');
 const { createClient } = require('@supabase/supabase-js');
 
+const {validatedTicks,quoteFromTicks,quoteFromSnapshot,freshQuoteRows}=require('./live_quote_validation');
 const SB = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 async function main() {
@@ -25,13 +26,12 @@ async function main() {
     cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
   } catch (e) {
     console.error('Failed to get cookies from browser:', e.message);
-  } finally {
-    await browser.close(); // Close browser immediately to save memory and CPU!
   }
 
   if (!cookieHeader) {
     console.error('❌ Error: Could not acquire Cloudflare clearance cookies.');
-    process.exit(1);
+    await browser.close();
+    throw Error('Could not acquire browser cookies');
   }
 
   console.log('✅ Cloudflare cookies acquired. Fetching market data via fast native requests...');
@@ -58,6 +58,22 @@ async function main() {
     } catch (err) {
       return [];
     }
+  }
+
+  async function companySnapshot(symbol) {
+    return page.evaluate(async symbol => {
+      const r=await fetch('/company/'+encodeURIComponent(symbol),{credentials:'include',signal:AbortSignal.timeout(15000)});
+      if(!r.ok)throw Error('Company page HTTP '+r.status);
+      const doc=new DOMParser().parseFromString(await r.text(),'text/html');
+      const root=doc.querySelector('#quote');
+      if(!root)throw Error('Missing company quote');
+      const stats={};
+      for(const item of root.querySelectorAll('.tabs__panel[data-name="REG"] .stats_item')){
+        const label=item.querySelector('.stats_label')?.textContent.trim();
+        if(label)stats[label]=item.querySelector('.stats_value')?.textContent.trim();
+      }
+      return {date:root.querySelector('.quote__date')?.textContent.trim(),close:root.querySelector('.quote__close')?.textContent.trim(),stats};
+    },symbol);
   }
 
   try {
@@ -90,96 +106,27 @@ async function main() {
 
     console.log(`Scraping ${syms.length} symbols in high-speed parallel batches...`);
 
-const freshQuotes = await pmap(syms, 10, async (sym) => {
+const freshQuotes = await pmap(syms, 10, async sym => {
       try {
-        const currentUtc = new Date().getUTCHours();
-        // The Pakistan market closes at 3:30 PM PKT (10:30 AM UTC). 
-        // If it's after 10:45 AM UTC, we consider the market closed and fetch EOD data.
-        const isMarketClosed = currentUtc >= 10 && new Date().getUTCMinutes() >= 45 || currentUtc > 10;
-        
-        const bar = barsMap.get(sym);
-        const ldcpFromBar = bar ? (bar.traded_on === today ? (bar.prev_close ?? bar.close) : bar.close) : 0;
-
-        // If the market is closed, ALWAYS use the official EOD endpoint for accurate closing prices
-        if (isMarketClosed) {
-          const eod = await psxJson(`/timeseries/eod/${sym}`);
-          if (eod.length) {
-            const rec = eod[0];
-            const eodDate = new Date(Number(rec[0]) * 1000);
-            eodDate.setUTCHours(eodDate.getUTCHours() + 5);
-            
-            if (eodDate.toISOString().slice(0, 10) === today) {
-              const close = Number(rec[1]);
-              const volume = Number(rec[2]);
-              const open = Number(rec[3]) || close;
-              const high = Number(rec[4]) || Math.max(open, close);
-              const low = Number(rec[5]) || Math.min(open, close);
-              const base = ldcpFromBar || open;
-              return {
-                symbol: sym, last: close, open, high, low, volume, ldcp: base,
-                change: Math.round((close - base) * 100) / 100,
-                change_pct: base ? Math.round(((close - base) / base) * 100 * 100) / 100 : 0,
-                fresh: true
-              };
-            }
-          }
-        }
-
-        // If market is open (or EOD data for today isn't published yet), use intraday ticks
-        let intraday = await psxJson(`/timeseries/int/${sym}`);
-        if (intraday.length) {
-          const tickDate = new Date(Number(intraday[0][0]) * 1000);
-          tickDate.setUTCHours(tickDate.getUTCHours() + 5);
-          if (tickDate.toISOString().slice(0, 10) !== today) intraday = [];
-        }
-
-        if (intraday.length) {
-          let high = -Infinity, low = Infinity, volume = 0;
-          for (const t of intraday) {
-            const p = Number(t[1]);
-            if (p <= 0) continue;
-            if (p > high) high = p;
-            if (p < low) low = p;
-            volume += Number(t[2]);
-          }
-          const last = Number(intraday[0][1]);
-          const open = Number(intraday[intraday.length - 1][1]);
-          if (last > 0) {
-            const base = ldcpFromBar || open;
-            return {
-              symbol: sym, last, open, high, low, volume, ldcp: base,
-              change: Math.round((last - base) * 100) / 100,
-              change_pct: base ? Math.round(((last - base) / base) * 100 * 100) / 100 : 0,
-              fresh: true
-            };
-          }
-        }
-
-        // Fallback: No data for today, return the previous day's close
-        if (bar) {
-          const base = bar.prev_close ?? bar.close;
-          return {
-            symbol: sym, last: bar.close, open: bar.close, high: bar.close, low: bar.close, volume: 0,
-            ldcp: base, change: 0, change_pct: 0, fresh: false
-          };
-        }
-        
-      } catch (err) {
-        return null;
-      }
-      return null;
+        // Prefer official REG snapshot: actual session high/low, cumulative
+        // volume, LDCP and source timestamp, including Friday session hours.
+        const snapshot=quoteFromSnapshot(sym,await companySnapshot(sym),today);
+        if(snapshot)return snapshot;
+      }catch(err){console.error(sym+': snapshot unavailable '+String(err));}
+      const bar=barsMap.get(sym);
+      const base=bar?(bar.traded_on===today?bar.prev_close:bar.close):null;
+      const ticks=validatedTicks(await psxJson('/timeseries/int/'+sym),today);
+      return quoteFromTicks(sym,ticks,base);
     });
 
     if (freshQuotes.length > 0) {
-      const rows = freshQuotes.map(q => ({
-        symbol: q.symbol, last_price: q.last, change: q.change, change_pct: q.change_pct,
-        open: q.open, high: q.high, low: q.low, volume: q.volume, ldcp: q.ldcp,
-        refreshed_at: new Date().toISOString()
-      }));
+      const rows = freshQuoteRows(freshQuotes);
       const { error: upsertErr } = await SB.from("market_quotes").upsert(rows);
       if (upsertErr) throw upsertErr;
       console.log(`✅ Success: Upserted ${rows.length} fresh quotes.`);
     }
+
+    if(!freshQuotes.length)throw Error("No validated current quotes; stored quotes preserved");
 
     // Sync Index KSE100
     const ticks = await psxJson('/timeseries/int/KSE100');
@@ -207,12 +154,17 @@ const freshQuotes = await pmap(syms, 10, async (sym) => {
       console.log("✅ Success: Index KSE100 updated.");
     }
 
-    await SB.from("sync_log").insert({ job: `psx-sync:${action}`, status: "ok", detail: `Synced ${freshQuotes.length} quotes` });
+    const missing=syms.length-freshQuotes.length;
+    await SB.from("sync_log").insert({ job: `psx-sync:${action}`, status: missing?"partial":"ok", detail: `Validated ${freshQuotes.length}/${syms.length} quotes; ${missing} unavailable symbols preserved` });
   } catch (e) {
     const msg = String(e).slice(0, 500);
     console.error(`❌ Error: ${msg}`);
     await SB.from("sync_log").insert({ job: `psx-sync:${action}`, status: "error", detail: msg });
+    process.exitCode=1;
+  } finally {
+    await browser.close();
   }
 }
 
-main();
+main().catch(e=>{console.error(String(e));process.exitCode=1;});
+
