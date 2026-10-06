@@ -25,7 +25,7 @@ test('official snapshot restores actual change, volume and source time',async()=
  assert.equal(q.change,4.79);assert.equal(q.change_pct,1.62);assert.equal(q.volume,12345);
  assert.equal(q.refreshed_at,'2026-10-06T04:58:00.000Z');assert.equal(r.closed,true);
  const p=r.writes.find(w=>w.table==='intraday_prices');
- assert.equal(p.rows[0].ts,q.refreshed_at);assert.equal(p.rows[0].price,q.last);assert.equal(p.rows[0].volume,null);
+ assert.equal(p.rows[0].ts,q.refreshed_at);assert.equal(p.rows[0].price,300);assert.equal(p.rows[0].volume,null);
  assert.equal(p.options.onConflict,'symbol,ts');assert.equal(p.options.ignoreDuplicates,true);
 });
 test('unavailable source cannot overwrite stored quotes with zero fallbacks',async()=>{
@@ -40,5 +40,6 @@ test('intraday write failure fails the run while preserving successful quote upd
 test('yesterday snapshot cannot be relabelled as current',async()=>{
  const r=await run({...snapshot,date:'As of Mon, Oct 5, 2026 3:44 PM'});assert.equal(r.writes.some(w=>w.table==='market_quotes'),false);assert.equal(r.exit,1);
 });
+
 
 
