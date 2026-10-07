@@ -9,7 +9,8 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: psx-eod-verified
+  # Serialize with historical gap repair, including its indicator writes.
+  group: psx-history-backfill
   cancel-in-progress: false
 jobs:
   eod-tasks:
