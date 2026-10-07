@@ -26,7 +26,9 @@ async function restore(sb,symbols,date,fetcher=fetchHistory,sleep=pause,dry=fals
   let bar,lastError;
   for(let attempt=0;attempt<3;attempt++){
    try{
-    const parsed=historicalRows(symbol,await fetcher(symbol,date,date),date,date);
+    const source=await fetcher(symbol,date,date);
+    const parsed=historicalRows(symbol,source,date,date);
+    if(parsed.rejected)console.error(`${symbol}: rejected source row ${JSON.stringify(source.rows)}`);
     if(parsed.rejected||parsed.rows.length!==1)throw Error('Final session candle unavailable or malformed');
     bar=parsed.rows[0];break;
    }catch(e){lastError=e.message;if(attempt<2)await sleep(20000*(attempt+1));}
@@ -71,7 +73,11 @@ async function main(){
   }
   const {data:stocks,error}=await sb.from('stocks').select('symbol').eq('is_active',true).order('symbol');
   if(error)throw error;
-  const symbols=(stocks??[]).map(r=>r.symbol).filter(s=>!EXCLUDED.has(s));
+  const requested=String(process.env.EOD_REQUESTED_SYMBOLS||'').trim();
+  if(requested&&!/^[A-Za-z0-9-]+(?:,[A-Za-z0-9-]+)*$/.test(requested))throw Error('Invalid requested symbol list');
+  const wanted=requested?new Set(requested.toUpperCase().split(',')):null;
+  const symbols=(stocks??[]).map(r=>r.symbol).filter(s=>!EXCLUDED.has(s)&&(!wanted||wanted.has(s)));
+  if(wanted&&symbols.length!==wanted.size)throw Error('Requested stock is not eligible');
   await restore(sb,symbols,date);
   if(process.env.GITHUB_OUTPUT)fs.appendFileSync(process.env.GITHUB_OUTPUT,`skip=false\nsession=${date}\nsymbols=${symbols.join(',')}\n`);
   console.log(`Verified final OHLCV for ${symbols.length} stocks on ${date}`);

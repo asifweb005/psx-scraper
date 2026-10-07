@@ -6,6 +6,10 @@ on:
         description: 'Completed session YYYY-MM-DD; blank uses today after 17:00 PKT'
         type: string
         default: ''
+      symbols:
+        description: 'Optional comma-separated tracked stocks for a targeted repair; blank selects all eligible stocks'
+        type: string
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -41,6 +45,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           EOD_SESSION: ${{ inputs.session }}
+          EOD_REQUESTED_SYMBOLS: ${{ inputs.symbols }}
         run: node eod_sync.js
       - uses: denoland/setup-deno@v1
         if: steps.eod.outputs.skip != 'true'
