@@ -1,25 +1,74 @@
 name: PSX End of Day Sync
-
 on:
-  schedule:
-    # Runs once daily at 5:45 PM PKT (12:45 UTC, Mon-Fri)
-    - cron: '45 12 * * 1-5'
   workflow_dispatch:
-
+    inputs:
+      session:
+        description: 'Completed session YYYY-MM-DD; blank uses today after 17:00 PKT'
+        type: string
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: psx-eod-verified
+  cancel-in-progress: false
 jobs:
   eod-tasks:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Deno
-        uses: denoland/setup-deno@v1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          deno-version: v1.x
-
-      - name: Run PSX EOD Scraper
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned EOD dependencies
+        working-directory: history
+        run: |
+          npm ci --ignore-scripts
+          python -m pip install -r requirements-history.txt
+      - name: Test EOD and source validation
+        working-directory: history
+        run: |
+          node --test history_validation.test.js eod_sync.test.js
+          python -m unittest test_export_history.py
+      - name: Fetch and verify final daily candles
+        id: eod
+        working-directory: history
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: deno run --allow-net --allow-env scraper.ts eod
+          EOD_SESSION: ${{ inputs.session }}
+        run: node eod_sync.js
+      - uses: denoland/setup-deno@v1
+        if: steps.eod.outputs.skip != 'true'
+        with:
+          deno-version: v1.x
+      - name: Test indicator mathematics
+        if: steps.eod.outputs.skip != 'true'
+        run: deno test indicators_test.ts
+      - name: Update KSE-100 daily history when available
+        if: steps.eod.outputs.skip != 'true'
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: deno run --allow-net --allow-env index_history.ts
+      - name: Recompute daily indicators after verified candles
+        if: steps.eod.outputs.skip != 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          EOD_SYMBOLS: ${{ steps.eod.outputs.symbols }}
+        run: deno run --allow-net --allow-env indicators.ts --backfill 7 --symbols "$EOD_SYMBOLS"
+      - name: Verify session indicator coverage
+        if: steps.eod.outputs.skip != 'true'
+        working-directory: history
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          EOD_SESSION: ${{ steps.eod.outputs.session }}
+          EOD_SYMBOLS: ${{ steps.eod.outputs.symbols }}
+        run: node eod_sync.js --verify-indicators
+

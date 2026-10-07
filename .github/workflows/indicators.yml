@@ -1,11 +1,7 @@
 name: PSX Indicators
 
 on:
-  # Runs right after "PSX End of Day Sync" finishes, so today's bar is already
-  # in historical_prices (a fixed cron could race it on a busy GitHub runner).
-  workflow_run:
-    workflows: ["PSX End of Day Sync"]
-    types: [completed]
+  # Daily recomputation now runs inside verified eod-sync.yml.
   # Manual runs: pick the args in the GitHub UI, e.g.
   #   --verify 2026-09-11   (read-only diff against stored rows)
   #   --dry-run             (compute, don't write)
