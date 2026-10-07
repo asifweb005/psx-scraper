@@ -19,6 +19,18 @@ function verifyCandles(expected,saved) {
  const missing=expected.filter(r=>!map.has(r.symbol)||['open','high','low','close','volume'].some(k=>!Number.isFinite(Number(map.get(r.symbol)[k]))||Number(map.get(r.symbol)[k])!==Number(r[k])));
  if(missing.length)throw Error('Stored candle verification failed: '+missing.map(r=>r.symbol).join(','));
 }
+function retainedCloseRow(symbol,source,date,previousClose){
+ // PSX Rulebook 19.1(a): when qualifying turnover is insufficient, the
+ // official close can retain the previous close, outside today's trade range.
+ // Accept only the exporter's exact schema and a corroborated previous close.
+ if(JSON.stringify(source.headers)!==JSON.stringify(['Date','OPEN','HIGH','LOW','CLOSE','VOLUME'])||source.rows?.length!==1)return null;
+ const [day,...raw]=source.rows[0];
+ if(day!==date||raw.some(v=>!/^\d+(?:\.\d+)?$/.test(String(v))))return null;
+ const [open,high,low,close,volume]=raw.map(Number);
+ if(![open,high,low,close,volume,previousClose].every(Number.isFinite)||!(low>0&&high>=open&&open>=low&&close>0)||!Number.isSafeInteger(volume)||volume<0)return null;
+ if(volume>=500||volume*high>=25000||close!==previousClose||close>=low&&close<=high)return null;
+ return {symbol,traded_on:date,open,high,low,close,volume,range_quality:'verified_ohlc'};
+}
 async function restore(sb,symbols,date,fetcher=fetchHistory,sleep=pause,dry=false) {
  if(!symbols.length)throw Error('No eligible EOD symbols');
  const rows=[],failures=[];
@@ -28,9 +40,14 @@ async function restore(sb,symbols,date,fetcher=fetchHistory,sleep=pause,dry=fals
    try{
     const source=await fetcher(symbol,date,date);
     const parsed=historicalRows(symbol,source,date,date);
-    if(parsed.rejected)console.error(`${symbol}: rejected source row ${JSON.stringify(source.rows)}`);
-    if(parsed.rejected||parsed.rows.length!==1)throw Error('Final session candle unavailable or malformed');
-    bar=parsed.rows[0];break;
+    if(parsed.rejected||parsed.rows.length!==1){
+     const {data:prior,error}=await sb.from('historical_prices').select('close,range_quality').eq('symbol',symbol).lt('traded_on',date).order('traded_on',{ascending:false}).limit(1).maybeSingle();
+     if(error)throw error;
+     bar=prior?.range_quality==='verified_ohlc'?retainedCloseRow(symbol,source,date,Number(prior.close)):null;
+     if(!bar)throw Error('Final session candle unavailable or malformed');
+     console.log(`${symbol}: verified PSX retained-close exception at ${bar.close}, volume ${bar.volume}`);
+    }else bar=parsed.rows[0];
+    break;
    }catch(e){lastError=e.message;if(attempt<2)await sleep(20000*(attempt+1));}
   }
   if(bar)rows.push(bar);else failures.push(symbol+': '+lastError);
@@ -87,5 +104,5 @@ async function main(){
  }
 }
 if(require.main===module)main().catch(e=>{console.error(e);process.exitCode=1;});
-module.exports={sessionDate,verifyCandles,restore,verifyIndicators};
+module.exports={sessionDate,verifyCandles,retainedCloseRow,restore,verifyIndicators};
 
