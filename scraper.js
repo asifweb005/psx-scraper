@@ -2,6 +2,7 @@ const puppeteer = require('puppeteer');
 const { createClient } = require('@supabase/supabase-js');
 
 const {validatedTicks,quoteFromTicks,quoteFromSnapshot,freshQuoteRows}=require('./live_quote_validation');
+const {indexFromSnapshot}=require('./index_validation');
 const SB = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 async function main() {
@@ -77,6 +78,38 @@ async function main() {
   }
 
   try {
+
+    // Index is independent of stock coverage. Read the official summary panel,
+    // including previous close and source time; never stamp stale data as new.
+    let indexOk=false;
+    try {
+      const snapshot=await page.evaluate(async()=>{
+        const r=await fetch('/?_t='+Date.now(),{credentials:'include',signal:AbortSignal.timeout(15000)});
+        if(!r.ok)throw Error('Index page HTTP '+r.status);
+        const doc=new DOMParser().parseFromString(await r.text(),'text/html');
+        const root=doc.querySelector('.marketIndices__details[data-name="KSE100"]');
+        if(!root)throw Error('Missing KSE100 panel');
+        const stats={};
+        for(const item of root.querySelectorAll('.stats_item')){
+          const label=item.querySelector('.stats_label')?.textContent.trim();
+          if(label)stats[label]=item.querySelector('.stats_value')?.textContent.trim();
+        }
+        return {date:root.dataset.date,close:root.dataset.close,stats};
+      });
+      const row=indexFromSnapshot(snapshot);
+      const {data:previous,error:readErr}=await SB.from('index_quotes').select('refreshed_at').eq('index_code','KSE100').maybeSingle();
+      if(readErr)throw readErr;
+      if(previous && Date.parse(previous.refreshed_at)>Date.parse(row.refreshed_at))throw Error('Index source would regress');
+      const {error}=await SB.from('index_quotes').upsert(row);
+      if(error)throw error;
+      indexOk=true;
+      console.log('KSE100: '+row.last_value+' change '+row.change+' ('+row.change_pct+'%), source '+row.refreshed_at);
+    }catch(err){
+      console.error('KSE100 unavailable: '+String(err));
+      const {error}=await SB.from('sync_log').insert({job:'psx-index',status:'error',detail:String(err).slice(0,500)});
+      if(error)console.error('Index error log failed: '+error.message);
+    }
+
     const { data: stocks, error: stockErr } = await SB.from("stocks").select("symbol").eq("is_active", true).order("symbol");
     if (stockErr) throw stockErr;
     const syms = (stocks ?? []).map(r => r.symbol);
@@ -135,34 +168,8 @@ const freshQuotes = await pmap(syms, 1, async sym => {
 
     if(!freshQuotes.length)throw Error("No validated current quotes; stored quotes preserved");
 
-    // Sync Index KSE100
-    const ticks = await psxJson('/timeseries/int/KSE100');
-    if (ticks.length) {
-      let high = -Infinity, low = Infinity;
-      for (const t of ticks) {
-        const p = Number(t[1]);
-        if (p > high) high = p;
-        if (p > 0 && p < low) low = p;
-      }
-      const last = Number(ticks[0][1]);
-      const open = Number(ticks[ticks.length - 1][1]);
-      const { data: q } = await SB.from("market_quotes").select("change_pct");
-      const adv = (q || []).filter(r => Number(r.change_pct) > 0).length;
-      const dec = (q || []).filter(r => Number(r.change_pct) < 0).length;
-
-      const indexRow = {
-        index_code: "KSE100", name: "KSE-100 Index", last_value: last, high, low,
-        change: Math.round((last - open) * 100) / 100,
-        change_pct: open ? Math.round(((last - open) / open) * 100 * 100) / 100 : 0,
-        advancers: adv, decliners: dec, unchanged: (q || []).length - adv - dec,
-        refreshed_at: new Date().toISOString()
-      };
-      await SB.from("index_quotes").upsert(indexRow);
-      console.log("✅ Success: Index KSE100 updated.");
-    }
-
     const missing=syms.length-freshQuotes.length;
-    await SB.from("sync_log").insert({ job: `psx-sync:${action}`, status: missing?"partial":"ok", detail: `Validated ${freshQuotes.length}/${syms.length} quotes; ${missing} unavailable symbols preserved` });
+    await SB.from("sync_log").insert({ job: `psx-sync:${action}`, status: missing||!indexOk?"partial":"ok", detail: `Validated ${freshQuotes.length}/${syms.length} quotes; ${missing} unavailable symbols preserved; KSE100 ${indexOk?"updated":"unavailable (stored value preserved)"}` });
   } catch (e) {
     const msg = String(e).slice(0, 500);
     console.error(`❌ Error: ${msg}`);
