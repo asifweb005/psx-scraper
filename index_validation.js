@@ -11,11 +11,12 @@ function indexFromSnapshot(s, now = Date.now()) {
   const last=num(s.close), prev=num(s.stats?.['Previous Close']);
   const high=num(s.stats?.High),low=num(s.stats?.Low),volume=num(s.stats?.Volume);
   if(![last,prev,high,low,volume].every(Number.isFinite) ||
-     Math.min(last,prev,high,low)<=0 || high<low || last<low || last>high ||
-     volume<0 || !Number.isInteger(volume)) throw Error('Invalid index values');
+     Math.min(last,prev,high,low)<=0 || high<low || last<low-0.01 || last>high+0.01 ||
+     volume<0 || !Number.isInteger(volume)) throw Error('Invalid index values: '+JSON.stringify({last,prev,high,low,volume,date:s.date}));
   const round=x=>Math.round(x*100)/100;
   return {index_code:'KSE100',name:'KSE-100 Index',last_value:last,
     change:round(last-prev),change_pct:round((last-prev)/prev*100),
     high,low,volume,advancers:null,decliners:null,unchanged:null,refreshed_at:new Date(ts).toISOString()};
 }
 module.exports={indexFromSnapshot};
+

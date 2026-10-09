@@ -14,6 +14,11 @@ test('rising index and unchanged index',()=>{
  let s=snapshot();s.close='169000';assert.equal(indexFromSnapshot(s,now).change,419.6);
  s.close='168580.40';assert.equal(indexFromSnapshot(s,now).change_pct,0);
 });
+test('source precision may differ from displayed range by less than one cent',()=>{
+ const s=snapshot();s.close='168036.735';
+ assert.equal(indexFromSnapshot(s,now).last_value,168036.735);
+ s.close='168036.70';assert.throws(()=>indexFromSnapshot(s,now),/last/);
+});
 test('reject stale, future and missing source dates',()=>{
  for(const date of ['2026-09-24 12:38:15','2026-10-09 12:38:15',undefined]){
  assert.throws(()=>indexFromSnapshot({...snapshot(),date},now));
@@ -25,3 +30,4 @@ test('reject invalid, absent and inconsistent prices and volumes',()=>{
  }
  assert.throws(()=>indexFromSnapshot({...snapshot(),close:'not a number'},now));
 });
+
